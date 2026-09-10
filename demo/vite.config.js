@@ -19,5 +19,7 @@ export default defineConfig({
     allowedHosts: true
   },
   preview: { headers: isolationHeaders },
-  build: { target: "esnext" },
+  // The large precompiled runtime is installed into dist separately. Preserve
+  // it while rebuilding this small Libra-aware launcher shell.
+  build: { target: "esnext", emptyOutDir: false },
 });

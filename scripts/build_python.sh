@@ -13,13 +13,16 @@ PYSRC=$(fetch_extract \
 NATIVE="$BLD/python-native"
 # Must be a COMPLETE build (incl. extension modules like binascii) — the wasm
 # cross-build runs this interpreter for its freeze/codegen steps.
-if [ ! -x "$NATIVE/python" ] || ! "$NATIVE/python" -c "import binascii, zlib" 2>/dev/null; then
+BUILD_PY="$NATIVE/python"
+[ -f "$NATIVE/python.exe" ] && BUILD_PY="$NATIVE/python.exe"
+
+if [ ! -x "$BUILD_PY" ] || ! "$BUILD_PY" -c "import binascii, zlib" 2>/dev/null; then
   log "building native build-python 3.13.13 (full)"
   rm -rf "$NATIVE"; mkdir -p "$NATIVE"; ( cd "$NATIVE"
     "$PYSRC/configure" -C >/dev/null
     make -j"$NPROC" >/dev/null 2>&1 )
+  [ -f "$NATIVE/python.exe" ] && BUILD_PY="$NATIVE/python.exe"
 fi
-BUILD_PY="$NATIVE/python"
 "$BUILD_PY" --version
 
 # 2) WASM cross-build → $SYSROOT.
@@ -31,17 +34,18 @@ WB="$BLD/python-wasm"; rm -rf "$WB"; mkdir -p "$WB"
   # a bad fpcast that traps ("null function or function signature mismatch") on
   # wasm. The trampoline routes those calls through JS (wasmTable.get + arity
   # reflection) so the real arity is honored. Not auto-defined by 3.13 configure.
-  CONFIG_SITE="$PYSRC/Tools/wasm/config.site-wasm32-emscripten" \
-  CFLAGS="-fexceptions -DPY_CALL_TRAMPOLINE" \
-    emconfigure "$PYSRC/configure" -C \
-      --host=wasm32-unknown-emscripten \
-      --build=x86_64-pc-linux-gnu \
-      --enable-wasm-pthreads \
-      --with-build-python="$BUILD_PY" \
-      --prefix="$SYSROOT" \
-      --disable-shared \
-      --disable-test-modules \
-      --with-ensurepip=no
+    HOST_TRIPLET="$(sh "$PYSRC/config.guess")"
+    CONFIG_SITE="$PYSRC/Tools/wasm/config.site-wasm32-emscripten" \
+    CFLAGS="-fexceptions -DPY_CALL_TRAMPOLINE -fPIC" \
+      emconfigure "$PYSRC/configure" -C \
+        --host=wasm32-unknown-emscripten \
+        --build="$HOST_TRIPLET" \
+        --enable-wasm-pthreads \
+        --with-build-python="$BUILD_PY" \
+        --prefix="$SYSROOT" \
+        --disable-shared \
+        --disable-test-modules \
+        --with-ensurepip=no
   emmake make -j"$NPROC"
   emmake make install )
 

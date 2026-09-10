@@ -703,3 +703,49 @@ input {
     font-size: 16px;
   }
 }
+
+/* Libra owns the surrounding chrome and actions. Its embedded runtime starts
+ * automatically, so show only a quiet bootstrap indicator over the future
+ * canvas instead of the public Puter landing/launch experience. */
+html[data-libra-embed="true"] #splash {
+  background: #181818;
+}
+
+html[data-libra-embed="true"] .top-nav,
+html[data-libra-embed="true"] .logo-lockup,
+html[data-libra-embed="true"] .splash-title,
+html[data-libra-embed="true"] .project-copy,
+html[data-libra-embed="true"] .panel-ready,
+html[data-libra-embed="true"] .gpu-warning,
+html[data-libra-embed="true"] .startup-console,
+html[data-libra-embed="true"] .credit-badge {
+  display: none !important;
+}
+
+html[data-libra-embed="true"] .stage {
+  padding: 24px;
+}
+
+html[data-libra-embed="true"] .stage-inner,
+html[data-libra-embed="true"] .launch-panel {
+  max-width: 320px;
+}
+
+html[data-libra-embed="true"] .launch-panel {
+  min-height: 0;
+  margin: 0;
+}
+
+html[data-libra-embed="true"] .panel-loading {
+  display: flex !important;
+}
+
+html[data-libra-embed="true"] .progress-track {
+  height: 4px;
+  background: #303030;
+}
+
+html[data-libra-embed="true"] .progress-meta,
+html[data-libra-embed="true"] .splash-status {
+  color: #b8b8b8;
+}

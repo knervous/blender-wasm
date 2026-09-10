@@ -12,10 +12,22 @@ src=$(fetch_extract \
 # needed APIs (unistd, usleep, isatty, strcasecmp_l), so treat emscripten as
 # Linux throughout. Idempotent via sentinel.
 if [ ! -f "$src/.wasm_linux_patched" ]; then
-  grep -rlZ '__linux__' "$src/src" | xargs -0 --no-run-if-empty sed -i \
-    -e 's/defined(__linux__)/(defined(__linux__) || defined(__EMSCRIPTEN__))/g'
-  grep -rlZ '#ifdef __linux__' "$src/src" | xargs -0 --no-run-if-empty sed -i \
-    -e 's/#ifdef __linux__/#if defined(__linux__) || defined(__EMSCRIPTEN__)/g'
+  python3 - <<PYEOF
+import os
+src = "$src/src"
+for root, dirs, files in os.walk(src):
+    for f in files:
+        if f.endswith(('.h', '.hh', '.hpp', '.c', '.cc', '.cpp')):
+            p = os.path.join(root, f)
+            with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                content = fh.read()
+            if '__linux__' in content:
+                new_content = content.replace('defined(__linux__)', '(defined(__linux__) || defined(__EMSCRIPTEN__))')
+                new_content = new_content.replace('#ifdef __linux__', '#if defined(__linux__) || defined(__EMSCRIPTEN__)')
+                if new_content != content:
+                    with open(p, 'w', encoding='utf-8') as fh:
+                        fh.write(new_content)
+PYEOF
   touch "$src/.wasm_linux_patched"
 fi
 

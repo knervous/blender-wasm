@@ -13,6 +13,20 @@
  */
 import { ZSTDDecoder } from "zstddec";
 
+/* Libra embeds the runtime as an isolated, same-origin editing surface. Keep
+ * the Emscripten globals inside this child document, but skip the public demo
+ * launcher and relay bootstrap state to the parent application. */
+const blenderParams = new URLSearchParams(window.location.search);
+const libraSessionUrl = blenderParams.get("libraSession");
+const libraObjectId = blenderParams.get("libraObjectId");
+const libraEmbedded = blenderParams.get("libraEmbed") === "1";
+document.documentElement.dataset.libraEmbed = String(libraEmbedded);
+
+const postToLibra = (message) => {
+  if (!libraEmbedded || window.parent === window) return;
+  window.parent.postMessage(message, window.location.origin);
+};
+
 /* ---- Splash UI: progress bar + startup console (ported from gecko-wasm's
  * demo/chrome/src/main.ts). ---- */
 const splashEl = document.getElementById("splash");
@@ -84,6 +98,13 @@ function setProgress(p) {
   fillEl.style.width = `${r}%`;
   progressbar.setAttribute("aria-valuenow", String(r));
   percentEl.textContent = `${r}%`;
+  postToLibra({
+    type: "libra-headed-progress",
+    objectId: libraObjectId,
+    phase: p.phase,
+    percent: r,
+    message: statusEl.textContent,
+  });
 }
 /* Legacy status() shim used elsewhere in this file. */
 const status = (t) => { statusEl.textContent = t; };
@@ -315,7 +336,17 @@ async function probeGpu() {
 
 /* Kick the probe off immediately and reflect it in the UI as soon as it lands. */
 gpuAck.addEventListener("change", refreshStartGate);
-probeGpu().then(applyGpuStatus).catch(() => {});
+const gpuProbePromise = probeGpu().then((result) => {
+  applyGpuStatus(result);
+  return result;
+}).catch((reason) => {
+  const result = {
+    ok: false, software: false, fatal: true, desc: "",
+    message: `WebGPU probe failed (${reason instanceof Error ? reason.message : String(reason)}). Blender cannot start.`,
+  };
+  applyGpuStatus(result);
+  return result;
+});
 
 /* ---- Download the asset tar + engine wasm CONCURRENTLY (one combined
  * progress bar), then zstd-decompress both. `assetProvider` (the zero-copy tar
@@ -353,6 +384,8 @@ const idbOpen = () => new Promise((res, rej) => {
 
 /* ---- boot ---- */
 window.__BGUI__ = { booted: false, device: false, window: false };
+const LIBRA_SESSION_PATH = "/tmp/libra-selected.blend";
+let resolveLibraSave = null;
 const scan = (t) => {
   if (t.includes("WEBGPU_CONTEXT") && t.includes("real device acquired")) window.__BGUI__.device = true;
   /* First frame that actually drew something (not the black startup clear):
@@ -361,6 +394,14 @@ const scan = (t) => {
     window.__BGUI__.window = true;
     splashEl.classList.add("done");
     canvas.classList.add("ready");
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: "libra-headed-ready", objectId: libraObjectId }, window.location.origin);
+    }
+  }
+  if (resolveLibraSave && /Saved.*\.blend/i.test(t)) {
+    const resolve = resolveLibraSave;
+    resolveLibraSave = null;
+    resolve();
   }
 };
 const canvas = document.getElementById("canvas");
@@ -429,6 +470,60 @@ window.addEventListener(
   },
   { capture: true },
 );
+
+/* Libra bridge: save the live editor state to its prepared in-memory .blend,
+ * then transfer a snapshot to the parent. The parent owns authentication and
+ * sends it through sdk.blender for GLB export, validation and versioning. */
+async function snapshotForLibra() {
+  if (!libraSessionUrl || !window.Module?.FS) throw new Error("No Libra session is open");
+  canvas.focus();
+  const previousModified = window.Module.FS.stat(LIBRA_SESSION_PATH).mtime.getTime();
+  const saved = new Promise((resolve, reject) => {
+    let poll;
+    const finish = () => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      resolveLibraSave = null;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      clearInterval(poll);
+      if (resolveLibraSave) resolveLibraSave = null;
+      reject(new Error("Blender did not finish saving within 30 seconds"));
+    }, 30000);
+    resolveLibraSave = finish;
+    poll = setInterval(() => {
+      try {
+        if (window.Module.FS.stat(LIBRA_SESSION_PATH).mtime.getTime() > previousModified) finish();
+      } catch (e) { /* Blender may briefly replace the file while saving. */ }
+    }, 100);
+  });
+  const eventInit = {
+    key: "s", code: "KeyS", keyCode: 83, which: 83,
+    ctrlKey: true, bubbles: true, cancelable: true,
+  };
+  window.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+  window.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+  await saved;
+  const bytes = window.Module.FS.readFile(LIBRA_SESSION_PATH);
+  const snapshot = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  window.parent.postMessage(
+    { type: "libra-headed-snapshot", objectId: libraObjectId, session: snapshot },
+    window.location.origin,
+    [snapshot],
+  );
+}
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin || event.source !== window.parent) return;
+  if (event.data?.type !== "libra-headed-save") return;
+  void snapshotForLibra().catch((reason) => {
+    window.parent.postMessage({
+      type: "libra-headed-error",
+      message: reason instanceof Error ? reason.message : String(reason),
+    }, window.location.origin);
+  });
+});
 
 /* ---- File ▸ Open hijack: a REAL, lazy mount (no copying) of a folder the
  * user picks on their machine. Blender's wm_open_mainfile invoke (wasm build)
@@ -738,11 +833,14 @@ window.__blenderFileOpenHook = async () => {
  * WebGPU device itself is acquired on the render pthread (creator.cc bootstrap),
  * so we only sanity-check WebGPU availability here. ---- */
 async function start() {
+  if (window.__BGUI__.booted) return;
+  window.__BGUI__.booted = true;
   /* WebGPU availability + software-renderer state were already probed and
    * surfaced (probeGpu / the Launch gate); a fatal GPU state keeps the button
    * disabled, so reaching here means we're clear to boot. */
   if (gpuStatus && gpuStatus.fatal) {
     console.error(gpuStatus.message.replace(/<[^>]+>/g, ""));
+    window.__BGUI__.booted = false;
     return;
   }
   if (gpuStatus && gpuStatus.software) {
@@ -752,8 +850,20 @@ async function start() {
   startBtn.disabled = true;
   startBtn.textContent = "Starting…";
 
+  let libraSessionBytes = null;
+  if (libraSessionUrl) {
+    status(`Loading ${libraObjectId || "selected Libra object"}…`);
+    const response = await fetch(libraSessionUrl);
+    if (!response.ok) throw new Error(`Libra Blender session: HTTP ${response.status}`);
+    libraSessionBytes = new Uint8Array(await response.arrayBuffer());
+    log(`Libra session staged: ${libraObjectId || "object"} · ${formatBytes(libraSessionBytes.byteLength)}`);
+  }
+
 window.Module = {
-  arguments: ["--factory-startup", ...(window.__BARGS || [])],
+  // Respect the browser-persisted Blender preferences. Forcing
+  // --factory-startup reopens Quick Setup on every boot; accepting that dialog
+  // replaces the scene and discards the selected Libra import.
+  arguments: [...(libraSessionBytes ? [LIBRA_SESSION_PATH] : []), ...(window.__BARGS || [])],
   canvas,
   print: (t) => { log(t); scan(t); },
   printErr: (t) => { log("[err] " + t); scan(t); },
@@ -802,6 +912,14 @@ window.Module = {
     })().catch((e) => log("wgsl cache: " + e)).finally(() => removeRunDependency("wgsl-cache"));
   }],
   onRuntimeInitialized: () => {
+    /* WasmFS native operations are not callable from preRun in this build.
+     * onRuntimeInitialized still precedes callMain(), so the positional
+     * .blend argument sees this file when Blender begins processing argv. */
+    if (libraSessionBytes) {
+      try { window.Module.FS.mkdir("/tmp"); } catch (e) { /* exists */ }
+      window.Module.FS.writeFile(LIBRA_SESSION_PATH, libraSessionBytes);
+      log(`Libra session mounted at ${LIBRA_SESSION_PATH}`);
+    }
     /* Parent of the local-folder mount points (wm_open_mainfile also creates
      * it wasm-side; this covers sessions where the dialog never opened). */
     try { window.Module.FS.mkdir(MOUNT_ROOT); } catch (e) { /* exists */ }
@@ -822,7 +940,31 @@ window.Module = {
   document.body.appendChild(s);
 }
 
-startBtn.onclick = () => { void start(); };
+const reportStartFailure = (reason) => {
+  window.__BGUI__.booted = false;
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.error(message);
+  status(`Failed to start: ${message}`);
+  postToLibra({ type: "libra-headed-error", objectId: libraObjectId, message });
+};
+
+startBtn.onclick = () => { void start().catch(reportStartFailure); };
 /* The button's enabled state is driven by refreshStartGate() (asset readiness +
  * GPU status + software-ack), not toggled unconditionally here. */
 refreshStartGate();
+
+if (libraEmbedded) {
+  /* Object Studio is the launcher UI. Once the runtime and adapter are ready,
+   * enter Blender directly; a software adapter is allowed with a warning so
+   * an embedded session never stalls behind an invisible acknowledgement. */
+  const embeddedGpu = await gpuProbePromise;
+  if (embeddedGpu.software) {
+    gpuAck.checked = true;
+    console.warn("Libra embed is continuing with a software WebGPU adapter.");
+  }
+  if (embeddedGpu.fatal) {
+    reportStartFailure(new Error(embeddedGpu.message.replace(/<[^>]+>/g, "")));
+  } else {
+    await start().catch(reportStartFailure);
+  }
+}

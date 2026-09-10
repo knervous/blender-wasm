@@ -9,14 +9,16 @@ ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # redirect us to a path that no longer exists (see emsdk-build-setup memory).
 EMSDK="$ROOT/emsdk"
 EM_BIN="$EMSDK/upstream/emscripten"
-export PATH="$EM_BIN:$PATH"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/opt/homebrew/sbin:$EM_BIN:$PATH"
+export PYTHON="${PYTHON:-/opt/homebrew/bin/python3}"
 
 SYSROOT="${SYSROOT:-$ROOT/wasm-sysroot}"
 DEPS="${DEPS:-$ROOT/deps}"
 DL="$DEPS/downloads"
 SRC="$DEPS/src"
 BLD="$DEPS/build"
-NPROC="${NPROC:-$(nproc)}"
+NPROC="${NPROC:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 
 # ABI-critical flags (-pthread, -fexceptions) MUST match across all objects and
 # the final Blender link. SIMD flags only affect codegen, not ABI, so they need

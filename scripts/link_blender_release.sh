@@ -10,7 +10,9 @@
 # The dev fast-path (link_blender_web.sh) is untouched and skips zstd.
 set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-export PATH="$ROOT/emsdk/upstream/emscripten:$PATH"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/opt/homebrew/sbin:$ROOT/emsdk/upstream/emscripten:$PATH"
+export PYTHON="${PYTHON:-/opt/homebrew/bin/python3}"
 BUILD="$ROOT/build-blender"
 OUT="$ROOT/demo/public"
 SYSROOT="$ROOT/wasm-sysroot"

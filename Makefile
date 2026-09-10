@@ -28,7 +28,7 @@ EM_TOOLCHAIN  := $(EM_BIN)/cmake/Modules/Platform/Emscripten.cmake
 # `emcmake cmake ...` needs emcc/em++/emcmake on PATH. Sourcing emsdk_env.sh is
 # unreliable when a stale EMSDK is already exported in the environment, so just
 # prepend the toolchain bindir directly (emcc finds node via its own config).
-EM_ENV        := export PATH="$(EM_BIN):$$PATH";
+EM_ENV        := export DEVELOPER_DIR=/Library/Developer/CommandLineTools; export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/opt/homebrew/sbin:$(EM_BIN):$$PATH";
 
 # --- layout (keep comments off these lines: trailing spaces leak into values) -
 # SYSROOT      : install prefix for cross-compiled deps
@@ -39,7 +39,7 @@ SYSROOT       := $(ROOT)/wasm-sysroot
 DEPS          := $(ROOT)/deps
 BUILD_CYCLES  := $(ROOT)/build-cycles
 WEB           := $(ROOT)/web
-NPROC         := $(shell nproc)
+NPROC         := $(shell sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 # --- common compile flags for every wasm object (deps + blender) -----------
 # Keep these identical across all libraries or linking will fail: pthreads,
@@ -163,6 +163,26 @@ configure-blender: toolchain blender blender-assets deps dep-python
 		-DCMAKE_CXX_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
 		-DWITH_WEBGPU_BACKEND=ON \
 		-C $(ROOT)/cmake/blender-wasm-cache.cmake
+
+# ---------------------------------------------------------------------------
+# Headless Blender → WASM for Node (libra's sdk.blender). No GHOST, no WebGPU,
+# no draw backend: libra only drives bpy (glTF import/export, mesh + modifier
+# ops), so the in-progress window/render stack is skipped entirely. Reuses the
+# same toolchain, deps, CPython and datafiles as the GUI build. Dir: the shared
+# build-blender (reconfigured in place — a second tree does not fit alongside).
+# ---------------------------------------------------------------------------
+configure-blender-headless: toolchain blender blender-assets deps dep-python
+	bash scripts/build_shader_tool_native.sh
+	$(EM_ENV) "$(EMCMAKE)" cmake -S blender -B build-blender -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_PREFIX_PATH="$(SYSROOT)" -DCMAKE_FIND_ROOT_PATH="$(SYSROOT)" \
+		-DCMAKE_C_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
+		-DCMAKE_CXX_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
+		-DWITH_HEADLESS=ON -DWITH_GHOST_WEB=OFF -DWITH_WEBGPU_BACKEND=OFF \
+		-C $(ROOT)/cmake/blender-wasm-headless-cache.cmake
+
+blender-headless: configure-blender-headless
+	$(EM_ENV) ninja -C build-blender blender
 
 # ---------------------------------------------------------------------------
 # Full Blender → browser (WebGPU). Web-relink the built blender objects with
