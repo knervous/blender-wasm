@@ -41,7 +41,8 @@ m = bpy.context.object
 m.modifiers.new("row", "ARRAY").count = 3
 bpy.ops.object.shade_smooth()
 mat = bpy.data.materials.new("orange")
-mat.diffuse_color = (0.9, 0.35, 0.05, 1)
+mat.use_nodes = True
+mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.9, 0.35, 0.05, 1)
 m.data.materials.append(mat)
 ` });
         label.textContent = `Blender ${session.flavor} · booted in ${(session.bootMs / 1000).toFixed(1)} s · click a mesh`;
