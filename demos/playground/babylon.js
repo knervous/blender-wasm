@@ -3,8 +3,8 @@
 // this scene in step. Click a mesh to nudge it: the move syncs to Blender.
 
 // The package from esm.sh, and its runtime from jsDelivr (keep the versions equal).
-const PKG = "https://esm.sh/@knervous/blender-web@0.0.2";
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/";
+const PKG = "https://esm.sh/@knervous/blender-web@0.0.3";
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
 
 export const createScene = async function () {
     const scene = new BABYLON.Scene(engine);

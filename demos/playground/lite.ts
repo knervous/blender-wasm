@@ -2,13 +2,13 @@
 // Blender runs as WebAssembly in a worker; @knervous/blender-web keeps it and
 // this Lite scene in step. Click a mesh to nudge it: the move syncs to Blender.
 import * as LITE from "@babylonjs/lite";
-import { Project } from "@knervous/blender-web@0.0.2";
-import { createBlenderSession } from "@knervous/blender-web@0.0.2/browser";
-import { LiteSide } from "@knervous/blender-web@0.0.2/lite";
+import { Project } from "@knervous/blender-web@0.0.3";
+import { createBlenderSession } from "@knervous/blender-web@0.0.3/browser";
+import { LiteSide } from "@knervous/blender-web@0.0.3/lite";
 
 // The runtime ships in the package; the CDN serves it as-is. Keep its
 // version the same as the imports'.
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/";
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
 
 async function main(): Promise<void> {
     const canvas = document.getElementById("renderCanvas") as HTMLCanvasElement;
