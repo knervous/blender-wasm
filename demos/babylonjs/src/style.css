@@ -50,7 +50,6 @@ textarea {
 #outliner li:hover { background: #303033; }
 #outliner li.selected { background: #3a4a5a; }
 #outliner li .kind { color: var(--muted); margin-left: 6px; font-size: 11px; }
-#outliner li.babylon-only::after { content: " · Babylon only"; color: var(--accent-2); font-size: 11px; }
 #log {
   flex: 1; margin: 0; overflow: auto; font: 11px/1.35 ui-monospace, monospace; color: #b8b8bd;
   background: #1a1a1c; border: 1px solid var(--line); border-radius: 4px; padding: 8px; white-space: pre-wrap;
@@ -62,3 +61,10 @@ textarea {
 .ui-bar .spacer { flex: 1; }
 #ui-status { color: var(--muted); }
 #ui-frame { flex: 1; border: 0; width: 100%; }
+
+label.inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+#pending { list-style: none; margin: 4px 0 0; padding: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--accent); max-height: 110px; overflow: auto; }
+#pending li.none { color: var(--muted); font-family: inherit; }
+#outliner li .state { margin-left: 6px; font-size: 11px; color: var(--accent); }
+#outliner li.untracked { color: var(--muted); }
+#outliner li.untracked::after { content: " · Babylon only"; color: var(--accent-2); font-size: 11px; }

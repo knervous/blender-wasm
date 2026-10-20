@@ -99,6 +99,13 @@ Blender in both directions. Edits in Babylon push back onto the `.blend`, and
 `bpy` scripts and Blender imports show up in Babylon. Blender runs in the tab:
 it uses the pthread browser runtime and assumes cross-origin isolation.
 
+## Project sync SDK
+
+[`sdk/project`](sdk/README.md) keeps Blender and an engine scene as one
+working project. Objects have stable ids, and the two sides exchange typed
+per-field changes; mesh data crosses only where geometry changed. Translators
+and hooks are pluggable per field and per stage. The Babylon demo is built on it.
+
 ## Optimising and compressing
 
 The relinks run at `-O1` so iteration stays fast. `./build.sh node|browser`

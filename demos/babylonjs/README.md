@@ -33,35 +33,33 @@ worker spawns Blender's pthreads, and terminating it afterwards reclaims both
 
 ## How the two sides stay in step
 
-The `.blend` the page holds is the source of truth for everything that came
-from Blender. Every operation opens it, changes it, saves it again and exports a
-GLB for Babylon to display (`src/session.js`).
+The page and Blender share one project (`../../sdk/project`, design in
+[`sdk/README.md`](../../sdk/README.md)). Every object has a stable id. A sync
+sends only what Babylon changed since the last agreed state and applies only
+what Blender changed. Mesh data crosses only for geometry whose fingerprint
+moved; there is no whole-scene export or reload.
+`src/babylon-side.ts` is Babylon's side: it builds nodes from the changes and
+reads them back. Project entities live under a root identical to the one
+Babylon's glTF loader builds, so a `.blend` looks the way its glTF export would.
 
-| action | what happens |
+| action | what crosses |
 |---|---|
-| New Blender scene / Open | Blender's default scene, or the file. A `.blend` opens as-is; `.glb/.gltf/.obj/.fbx/.stl/.ply` are imported into an empty scene. |
-| Move / rotate / scale, Delete | Babylon only, until you push. Moved nodes are marked in the outliner. |
-| **Push transforms → Blender** | Changed transforms and deletions, matched by object name, are applied to the Blender objects. Modifiers, materials and everything else in the `.blend` stay intact. |
-| **Run Python** | Any `bpy` script against the current scene. |
-| Add box / sphere, opening `.babylon`/USD (or Shift+open a glTF) | Babylon-only content, shown as such in the outliner. |
-| **Send Babylon scene → Blender** | The whole Babylon scene (minus the editor's camera, lights and grid) is exported to GLB and becomes the new Blender scene. This is lossy for Blender-only data. |
+| New Blender scene / Open | The file becomes the project, and its objects arrive as creates. A `.blend` opens as-is; `.glb/.gltf/.obj/.fbx/.stl/.ply` are imported into an empty scene. |
+| Move, rotate, scale, delete, Add box/sphere | Listed under **Sync** as pending changes, typed and per object. |
+| **Sync with Blender** | Just those changes go out (create with mesh data, delete, update one field). What comes back is only what Blender changed beyond them. *Auto-sync* sends them shortly after each edit. |
+| **Run Python** | A sync, plus a `bpy` script; only what the script changed comes back. |
+| Open `.babylon`/USD (or Shift+open a glTF/OBJ/STL) | Loaded into Babylon outside the project ("Babylon only"). **Adopt Babylon content** brings it in, keeping its placement; the next sync creates it in Blender. |
+| **Open in Blender UI** → Save back | The edited `.blend` is adopted: pending Babylon edits are replayed onto it, and where both sides changed a field the conflict policy decides (Blender by default). The result is logged. |
 
-Transforms cross in glTF space. Babylon's glTF loader keeps each node's
-authored right-handed TRS under a `__root__` that converts handedness. Blender's
-exporter writes each `matrix_local` conjugated into Y-up. So the push applies
-`M_blender = A⁻¹ · M_gltf · A`, with `A` mapping Blender's (x, y, z) to glTF's
-(x, z, −y). Cameras and lights are not pushed, because the exporter adds an
-orientation correction to them.
-
-The GLB is exported with modifiers applied, so Babylon shows the evaluated
-mesh. Blender's own lights come across in physical units (a 1000 W lamp is very
-bright in Babylon), so they are off in the viewport unless you tick the box.
+The status line and log show each sync's traffic, for example
+`sent ~ Cube.transform, + box_ee7f · received ~ box_ee7f mesh (36 verts)`.
 
 ## Limits of this build
 
 - No OpenSubdiv, so Subdivision Surface does nothing. Array, Bevel, Mirror and
   the other non-subdivision modifiers work.
-- Each Blender operation takes a few seconds. Most of that is starting Blender,
-  not the work itself.
+- Each sync is one Blender run, about 4 s, mostly Blender's startup.
+- Material and mesh edits made in Babylon travel only when an object is
+  created; see the limits in `sdk/README.md`.
 - The console shows a `_multiprocessing` traceback on every run. That's an
   add-on import Blender reports and moves past.

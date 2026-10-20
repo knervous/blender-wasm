@@ -7,6 +7,8 @@
  * fed that compiled module, because Blender's main() never returns and an
  * instance is good for one run.
  */
+import type { BlenderRunner } from "../../../sdk/project/index.ts";
+
 export const COMPLETION_MARKER = "<<<BLENDER_RUN_COMPLETE>>>";
 const ERROR_MARKER = "<<<BLENDER_PYTHON_ERROR>>>";
 
@@ -27,14 +29,17 @@ const WRAPPER = [
 const encoder = new TextEncoder();
 
 export class BlenderPythonError extends Error {
-  constructor(traceback, output) {
+  readonly traceback: string;
+  readonly output: string;
+
+  constructor(traceback: string, output: string) {
     super(traceback.trim().split("\n").at(-1) ?? "Blender Python error");
     this.traceback = traceback;
     this.output = output;
   }
 }
 
-function checkOutput(output) {
+function checkOutput(output: string): void {
   const at = output.indexOf(ERROR_MARKER);
   if (at >= 0) {
     throw new BlenderPythonError(output.slice(at + ERROR_MARKER.length, output.indexOf(COMPLETION_MARKER, at)), output);
@@ -42,7 +47,12 @@ function checkOutput(output) {
 }
 
 /** The installed runtime's manifest, or null when none is installed. */
-export async function runtimeInstalled() {
+export interface RuntimeManifest {
+  forkRevision: string;
+  wasmOpt: string;
+}
+
+export async function runtimeInstalled(): Promise<RuntimeManifest | null> {
   try {
     const response = await fetch("blender-runtime/manifest.json", { cache: "no-store" });
     if (!response.ok || !(response.headers.get("content-type") ?? "").includes("json")) return null;
@@ -53,9 +63,9 @@ export async function runtimeInstalled() {
 }
 
 /** `run({ code, blendFile, files, onLine })`; `onLine` receives Blender's output as it prints. */
-export function createBlender({ onProgress = () => {} } = {}) {
+export function createBlender({ onProgress = (_text: string) => {} } = {}): BlenderRunner {
   const runtimeUrl = new URL("blender-runtime/", document.baseURI).href;
-  let assets;
+  let assets: Promise<{ wasmModule: WebAssembly.Module; dataPackage: ArrayBuffer }> | undefined;
   const load = () => (assets ??= (async () => {
     onProgress("compiling blender.wasm (once per page)");
     const [wasmModule, dataPackage] = await Promise.all([
@@ -66,12 +76,12 @@ export function createBlender({ onProgress = () => {} } = {}) {
   })());
 
   return {
-    async run({ code, blendFile, files = {}, onLine = () => {} }) {
+    async run({ code, blendFile, files, onLine = () => {} }) {
       const { wasmModule, dataPackage } = await load();
       const staged = { ...files, "/job/main.py": encoder.encode(WRAPPER), "/job/user.py": encoder.encode(code) };
       const worker = new Worker(new URL("blender-worker.js", document.baseURI));
       try {
-        const result = await new Promise((resolve, reject) => {
+        const result = await new Promise<{ output: string; files: Record<string, Uint8Array> }>((resolve, reject) => {
           worker.onerror = (event) => reject(new Error(event.message || "Blender worker failed"));
           worker.onmessage = ({ data }) => {
             if (data.type === "line") onLine(data.text);

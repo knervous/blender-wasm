@@ -35,7 +35,7 @@
           <label class="button">Open file…<input id="open" type="file" hidden
             accept=".blend,.glb,.gltf,.babylon,.obj,.fbx,.stl,.ply,.usdz,.usda,.usdc" /></label>
         </div>
-        <p class="hint">.blend and .fbx/.ply open in Blender. .glb/.gltf/.obj/.stl open in Blender too; hold Shift to open them in Babylon only. .babylon and USD open in Babylon.</p>
+        <p class="hint">.blend and anything Blender imports open as the project. .babylon and USD (or Shift+open a glTF/OBJ/STL) load into Babylon only, outside the project until you adopt them.</p>
       </section>
 
       <section>
@@ -47,13 +47,11 @@
       <section>
         <h2>Sync</h2>
         <div class="row">
-          <button id="push">Push transforms → Blender</button>
-          <button id="send">Send Babylon scene → Blender</button>
+          <button id="sync">Sync with Blender</button>
+          <label class="hint inline"><input id="auto-sync" type="checkbox" /> Auto-sync after edits</label>
         </div>
-        <div class="row">
-          <button id="reload">Reload from Blender</button>
-        </div>
-        <p id="link-state" class="hint"></p>
+        <ul id="pending"></ul>
+        <p class="hint">Only what changed crosses: Babylon's edits since the last sync go to Blender, and only what Blender changed comes back, mesh data included only where geometry changed.</p>
       </section>
 
       <section>
@@ -67,6 +65,7 @@
           <button id="add-box">Add box</button>
           <button id="add-sphere">Add sphere</button>
           <button id="delete">Delete</button>
+          <button id="adopt">Adopt Babylon content</button>
         </div>
         <label class="hint"><input id="blender-lights" type="checkbox" /> Light with Blender's lights (physical units: a 1000 W lamp is very bright)</label>
         <ul id="outliner"></ul>
@@ -103,6 +102,6 @@ monkey.data.materials.append(mat)</textarea>
         <pre id="log"></pre>
       </section>
     </aside>
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
