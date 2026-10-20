@@ -1,11 +1,11 @@
 import {
   ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, GizmoManager, HemisphericLight, LoadAssetContainerAsync,
-  Mesh, MeshBuilder, MultiMaterial, PBRMaterial, PointerEventTypes, Scene, SceneSerializer, StandardMaterial,
-  TransformNode, Vector3,
+  Material, Mesh, MeshBuilder, MultiMaterial, PBRMaterial, PointerEventTypes, Quaternion, Scene, SceneSerializer,
+  StandardMaterial, SubMesh, TransformNode, Vector3, VertexBuffer, VertexData,
   type Node,
 } from "@babylonjs/core";
 import "@babylonjs/loaders";
-import { BabylonSide, defaultMaterialAdapter } from "@knervous/blender-web/babylon";
+import { BabylonSide } from "@knervous/blender-web/babylon";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
 export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<TransformNode> & { scene: Scene } {
@@ -25,7 +25,11 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
   grid.color = new Color3(0.32, 0.32, 0.35);
   grid.isPickable = false;
 
-  const side = new BabylonSide(scene);
+  // The adapter uses this app's Babylon classes (the whole namespace works too).
+  const side = new BabylonSide({
+    Color3, Material, Mesh, MultiMaterial, PBRMaterial, Quaternion, StandardMaterial, SubMesh, TransformNode,
+    VertexBuffer, VertexData,
+  }, scene);
   /** Materials made here and not yet on a tracked mesh (so not yet project materials). */
   const created = new Map<string, PBRMaterial>();
   /** Content loaded into Babylon outside the project (until adopted). */
@@ -56,6 +60,7 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
     engine: "Babylon.js",
     scene,
     side,
+    gizmos: true,
     formats: ["glb", "gltf", "obj", "stl", "babylon", "usdz", "usda", "usdc", "usd"],
     nativeExport: { label: ".babylon", file: "scene.babylon" },
     start() {
@@ -104,7 +109,7 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
         ? MeshBuilder.CreateBox(name, { size: 1 }, scene)
         : MeshBuilder.CreateSphere(name, { diameter: 1, segments: 16 }, scene);
       const material = new PBRMaterial(`${name}_material`, scene);
-      defaultMaterialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
+      side.materialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
       mesh.material = material;
       side.track([mesh]);
       return mesh;
@@ -121,13 +126,13 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
     },
     createMaterial(name, state) {
       const material = new PBRMaterial(name, scene);
-      defaultMaterialAdapter.write(material, state);
+      side.materialAdapter.write(material, state);
       created.set(material.name, material);
       return material.name;
     },
     editMaterial(name, state) {
       const material = side.material(name);
-      if (material) defaultMaterialAdapter.write(material, state);
+      if (material) side.materialAdapter.write(material, state);
     },
     decorate() {
       for (const [id, entity] of Object.entries(side.read())) {

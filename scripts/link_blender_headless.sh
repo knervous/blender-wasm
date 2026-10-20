@@ -64,10 +64,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/link_common.sh"
 
 TARGET="${TARGET:-node}"
 case "$TARGET" in
-  node)    ENVIRONMENT=node ;;
-  browser) ENVIRONMENT=web,worker ;;
-  *) die "TARGET must be node or browser (got '$TARGET')" ;;
+  node)       ENVIRONMENT=node ;;
+  browser)    ENVIRONMENT=web,worker ;;
+  browser-st) ENVIRONMENT=web,worker ;;
+  *) die "TARGET must be node, browser or browser-st (got '$TARGET')" ;;
 esac
+# browser-st is the single-threaded build: its objects are THREADS=0 ones.
+if [ "$TARGET" = browser-st ] && [ "$THREADS" != 0 ]; then die "browser-st links the THREADS=0 build (./build.sh browser-st)"; fi
+if [ "$TARGET" != browser-st ] && [ "$THREADS" = 0 ]; then die "THREADS=0 links only browser-st"; fi
 OUT="${OUT:-$ROOT/$TARGET}"
 STAGE="$OUT/blender_assets"
 LINK_OPT="${LINK_OPT:--O1}"
@@ -88,13 +92,25 @@ precompile_python "$STAGE/$BLENDER_VERSION_DIR/scripts" "$STAGE/python3.13"
 log "scripts=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/scripts"|cut -f1) datafiles=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/datafiles"|cut -f1) py=$(du -sh "$STAGE/python3.13"|cut -f1)"
 
 
-FLAGS="-pthread \
+# Threads: the pthread build runs main() on a pthread (PROXY_TO_PTHREAD, above).
+# The single-threaded build runs main() on the worker's own thread and gives
+# the thread back with JSPI: Blender's poll loop (BLENDER_WASM_POLL, see
+# patches/blender) and time.sleep suspend to the event loop. JSPI cannot
+# suspend through JS frames, which is why that build's ABI uses wasm
+# exceptions and setjmp/longjmp (no invoke_* trampolines).
+if [ "$THREADS" = 0 ]; then
+  THREAD_FLAGS="$ABI_FLAGS -sJSPI"
+else
+  THREAD_FLAGS="-pthread -sPROXY_TO_PTHREAD -sDEFAULT_PTHREAD_STACK_SIZE=4194304 \
+  -sPTHREAD_POOL_SIZE=4 -sPTHREAD_POOL_SIZE_STRICT=0"
+fi
+
+FLAGS="$THREAD_FLAGS \
   -Wl,--allow-multiple-definition \
-  -sPROXY_TO_PTHREAD -sEXIT_RUNTIME=0 \
+  -sEXIT_RUNTIME=0 \
   $LINK_OPT \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sMAXIMUM_MEMORY=4294967296 \
-  -sSTACK_SIZE=16777216 -sDEFAULT_PTHREAD_STACK_SIZE=4194304 \
-  -sPTHREAD_POOL_SIZE=4 -sPTHREAD_POOL_SIZE_STRICT=0 \
+  -sSTACK_SIZE=16777216 \
   -sFORCE_FILESYSTEM=1 \
   -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPF32 \
   -sENVIRONMENT=$ENVIRONMENT -sASSERTIONS=$ASSERTIONS -sERROR_ON_UNDEFINED_SYMBOLS=0 \

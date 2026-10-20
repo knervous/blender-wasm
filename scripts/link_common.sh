@@ -66,9 +66,9 @@ stage_cycles_addon() {
 # cross-builds it as emscripten SIDE_MODULEs loaded through CPython's dlopen.
 stage_numpy() {
   local pystage="$1" whl
-  whl=$(ls "$ROOT/numpy-build/dist/"*.whl 2>/dev/null | head -1 || true)
+  whl=$(ls "$NUMPY_BUILD/dist/"*.whl 2>/dev/null | head -1 || true)
   if [ -z "$whl" ]; then
-    log "WARNING: no numpy wheel in numpy-build/dist — glTF import/export will fail"
+    log "WARNING: no numpy wheel in $NUMPY_BUILD/dist — glTF import/export will fail"
     return 0
   fi
   log "staging numpy from $(basename "$whl")"

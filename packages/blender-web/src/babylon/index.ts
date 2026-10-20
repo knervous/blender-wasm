@@ -1,18 +1,4 @@
-// Deep imports, not the @babylonjs/core barrel: the barrel pulls all of
-// Babylon into an app's bundle (10 MB), these only what the adapter uses.
-import { VertexBuffer } from "@babylonjs/core/Buffers/buffer.js";
-import { Material } from "@babylonjs/core/Materials/material.js";
-import { MultiMaterial } from "@babylonjs/core/Materials/multiMaterial.js";
-import { PBRMaterial } from "@babylonjs/core/Materials/PBR/pbrMaterial.js";
-import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
-import { Color3 } from "@babylonjs/core/Maths/math.color.js";
-import { Quaternion } from "@babylonjs/core/Maths/math.vector.js";
-import { Mesh } from "@babylonjs/core/Meshes/mesh.js";
-import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData.js";
-import { SubMesh } from "@babylonjs/core/Meshes/subMesh.js";
-import { TransformNode } from "@babylonjs/core/Meshes/transformNode.js";
-import type { Node } from "@babylonjs/core/node.js";
-import type { Scene } from "@babylonjs/core/scene.js";
+import type * as BABYLON from "@babylonjs/core";
 import type {
   Change, EngineSide, EntityKind, EntityState, Field, MaterialAdapter, MaterialAssignment, MaterialState, MeshData,
   Transform,
@@ -33,10 +19,27 @@ import type {
  * its coordinates. Project meshes keep glTF's counter-clockwise winding and
  * are oriented the way that loader orients them, so a mesh crosses as-is.
  *
+ * Babylon itself comes from the app (`new BabylonSide(BABYLON, scene)`): the
+ * adapter only imports Babylon's types, so it always uses the app's copy of
+ * the engine (one copy of each class, so `instanceof` holds, whatever the
+ * bundler or playground). Pass the namespace or just the classes in
+ * `BabylonApi`.
+ *
  * Field adapters translate each field between a node and the shared
  * description; the material adapter does the same for material properties.
  * Pass replacements to customise either.
  */
+export type BabylonApi = Pick<typeof BABYLON,
+  "Color3" | "Material" | "Mesh" | "MultiMaterial" | "PBRMaterial" | "Quaternion" | "StandardMaterial" | "SubMesh"
+  | "TransformNode" | "VertexBuffer" | "VertexData">;
+
+type Node = BABYLON.Node;
+type Scene = BABYLON.Scene;
+type TransformNode = BABYLON.TransformNode;
+type Mesh = BABYLON.Mesh;
+type Material = BABYLON.Material;
+type VertexData = BABYLON.VertexData;
+
 export interface FieldAdapter<V> {
   read(node: TransformNode, side: BabylonSide): V;
   write(node: TransformNode, value: V, side: BabylonSide): void;
@@ -59,21 +62,21 @@ export const defaultAdapters: FieldAdapters = {
     write: (node, value) => { node.name = value; },
   },
   parent: {
-    read: (node, side) => side.idOf(node.parent instanceof TransformNode ? node.parent : null),
+    read: (node, side) => side.idOf(node.parent instanceof side.api.TransformNode ? node.parent : null),
     write: (node, value, side) => { node.parent = (value && side.node(value)) || side.root; },
   },
   transform: {
-    read: (node) => {
-      const r = node.rotationQuaternion ?? Quaternion.FromEulerVector(node.rotation);
+    read: (node, side) => {
+      const r = node.rotationQuaternion ?? side.api.Quaternion.FromEulerVector(node.rotation);
       return {
         t: [node.position.x, node.position.y, node.position.z],
         r: [r.x, r.y, r.z, r.w],
         s: [node.scaling.x, node.scaling.y, node.scaling.z],
       } satisfies Transform;
     },
-    write: (node, value) => {
+    write: (node, value, side) => {
       node.position.set(...value.t);
-      node.rotationQuaternion = new Quaternion(...value.r);
+      node.rotationQuaternion = new side.api.Quaternion(...value.r);
       node.scaling.set(...value.s);
     },
   },
@@ -92,32 +95,34 @@ export const defaultAdapters: FieldAdapters = {
  * metallic, and its roughness maps to specularPower). Other materials read
  * as a neutral default and are left alone on write.
  */
-export const defaultMaterialAdapter: MaterialAdapter<Material> = {
-  read(material) {
-    if (material instanceof PBRMaterial) {
-      const c = material.albedoColor;
-      return { color: [c.r, c.g, c.b, material.alpha], metallic: material.metallic ?? 0, roughness: material.roughness ?? 0.5 };
-    }
-    if (material instanceof StandardMaterial) {
-      const c = material.diffuseColor;
-      return { color: [c.r, c.g, c.b, material.alpha], metallic: 0, roughness: 1 - Math.min(1, material.specularPower / 128) };
-    }
-    return { color: [0.8, 0.8, 0.8, material.alpha], metallic: 0, roughness: 0.5 };
-  },
-  write(material, state) {
-    if (material instanceof PBRMaterial) {
-      material.albedoColor = new Color3(state.color[0], state.color[1], state.color[2]);
-      material.metallic = state.metallic;
-      material.roughness = state.roughness;
-    } else if (material instanceof StandardMaterial) {
-      material.diffuseColor = new Color3(state.color[0], state.color[1], state.color[2]);
-      material.specularPower = (1 - state.roughness) * 128;
-    } else {
-      return;
-    }
-    material.alpha = state.color[3];
-  },
-};
+export function babylonMaterialAdapter(api: BabylonApi): MaterialAdapter<Material> {
+  return {
+    read(material) {
+      if (material instanceof api.PBRMaterial) {
+        const c = material.albedoColor;
+        return { color: [c.r, c.g, c.b, material.alpha], metallic: material.metallic ?? 0, roughness: material.roughness ?? 0.5 };
+      }
+      if (material instanceof api.StandardMaterial) {
+        const c = material.diffuseColor;
+        return { color: [c.r, c.g, c.b, material.alpha], metallic: 0, roughness: 1 - Math.min(1, material.specularPower / 128) };
+      }
+      return { color: [0.8, 0.8, 0.8, material.alpha], metallic: 0, roughness: 0.5 };
+    },
+    write(material, state) {
+      if (material instanceof api.PBRMaterial) {
+        material.albedoColor = new api.Color3(state.color[0], state.color[1], state.color[2]);
+        material.metallic = state.metallic;
+        material.roughness = state.roughness;
+      } else if (material instanceof api.StandardMaterial) {
+        material.diffuseColor = new api.Color3(state.color[0], state.color[1], state.color[2]);
+        material.specularPower = (1 - state.roughness) * 128;
+      } else {
+        return;
+      }
+      material.alpha = state.color[3];
+    },
+  };
+}
 
 export interface BabylonSideOptions {
   adapters?: Partial<FieldAdapters>;
@@ -132,18 +137,20 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
   /** Project materials by name: Blender's, and those tracked meshes use. */
   private readonly materials = new Map<string, Material>();
   private readonly adapters: FieldAdapters;
-  private readonly materialAdapter: MaterialAdapter<Material>;
+  /** Reads and writes material properties (the default handles PBR and Standard materials). */
+  readonly materialAdapter: MaterialAdapter<Material>;
   private readonly createMaterial: (name: string, scene: Scene) => Material;
 
-  constructor(readonly scene: Scene, options: BabylonSideOptions = {}) {
+  /** `api`: the app's Babylon (`import * as BABYLON from "@babylonjs/core"`), or the classes in BabylonApi. */
+  constructor(readonly api: BabylonApi, readonly scene: Scene, options: BabylonSideOptions = {}) {
     this.adapters = { ...defaultAdapters, ...options.adapters };
-    this.materialAdapter = options.materialAdapter ?? defaultMaterialAdapter;
-    this.createMaterial = options.createMaterial ?? ((name, s) => new PBRMaterial(name, s));
+    this.materialAdapter = options.materialAdapter ?? babylonMaterialAdapter(api);
+    this.createMaterial = options.createMaterial ?? ((name, s) => new api.PBRMaterial(name, s));
     // Exactly the root Babylon's glTF loader builds in a left-handed scene, so a
     // project looks as the same file would through that loader, and loaded
     // glTF content keeps its own coordinates.
-    this.root = new TransformNode("project-root", scene);
-    this.root.rotationQuaternion = new Quaternion(0, 1, 0, 0);
+    this.root = new api.TransformNode("project-root", scene);
+    this.root.rotationQuaternion = new api.Quaternion(0, 1, 0, 0);
     this.root.scaling.z = -1;
   }
 
@@ -200,7 +207,7 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
 
   meshData(id: string): MeshData | null {
     const node = this.node(id);
-    return node instanceof Mesh ? readMesh(node) : null;
+    return node instanceof this.api.Mesh ? readMesh(this.api, node) : null;
   }
 
   materialsOf(id: string): MaterialAssignment[] {
@@ -238,13 +245,26 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
   }
 
   // --- tracking engine content ---------------------------------------------------
+  /**
+   * Two kinds of content, by where it sits:
+   * - under a glTF loader's `__root__` (the same transform as the project
+   *   root): already glTF space. It moves under the project root with its
+   *   local transforms and vertex data as they are.
+   * - anywhere else: Babylon's own space. The project root is a mirror in X,
+   *   so each node's transform is conjugated by it (t.x, q.y and q.z change
+   *   sign) and its vertices are mirrored in X, with triangles reversed and V
+   *   flipped. The node looks the same as before and Blender gets a proper,
+   *   unmirrored object.
+   */
   track(nodes: TransformNode[]): string[] {
     const ids: string[] = [];
-    const visit = (node: TransformNode): void => {
+    const visit = (node: TransformNode, native: boolean): void => {
+      if (native) mirrorTransform(this.api, node);
       if (!this.idOf(node)) {
         const id = newId();
-        if (node instanceof Mesh && node.getTotalVertices() > 0) {
-          applyMesh(node, canonicalFromVertexData(VertexData.ExtractFromMesh(node)));
+        if (node instanceof this.api.Mesh && node.getTotalVertices() > 0) {
+          const data = this.api.VertexData.ExtractFromMesh(node);
+          applyMesh(this.api, node, native ? canonicalFromBabylon(data) : canonicalFromGltf(data, node));
           this.register(node, id, "mesh");
           metadataOf(node).bwMaterials = this.slotsOf(node);
         } else {
@@ -252,17 +272,33 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
         }
         ids.push(id);
       }
-      for (const child of node.getChildren((c): c is TransformNode => c instanceof TransformNode, true)) visit(child);
+      for (const child of node.getChildren((c): c is TransformNode => c instanceof this.api.TransformNode, true)) visit(child, native);
     };
-    // Loader handedness roots (glTF's __root__) are not content: track through them.
-    const content = nodes.flatMap((node) => node.name === "__root__"
-      ? node.getChildren((c): c is TransformNode => c instanceof TransformNode, true)
-      : [node]);
-    for (const node of content) {
-      if (!node.isDescendantOf(this.root)) node.setParent(this.root);
-      visit(node);
+    for (const node of nodes) {
+      if (node.name === "__root__") {
+        // Not content: its children are glTF-space nodes under the same transform as ours.
+        for (const child of node.getChildren((c): c is TransformNode => c instanceof this.api.TransformNode, true)) {
+          child.parent = this.root;
+          visit(child, false);
+        }
+        if (node.getChildren().length === 0) node.dispose();
+      } else if (node.isDescendantOf(this.root)) {
+        visit(node, false);
+      } else {
+        // Babylon world space: the transform relative to the project root is
+        // the world transform conjugated by the root's mirror.
+        node.computeWorldMatrix(true);
+        const scaling = node.absoluteScaling.clone();
+        const rotation = node.absoluteRotationQuaternion.clone();
+        const position = node.absolutePosition.clone();
+        node.parent = this.root;
+        node.position.copyFrom(position);
+        node.rotationQuaternion = rotation;
+        node.scaling.copyFrom(scaling);
+        // visit() conjugates this node and everything under it.
+        visit(node, true);
+      }
     }
-    for (const node of nodes) if (node.name === "__root__" && node.getChildren().length === 0) node.dispose();
     return ids;
   }
 
@@ -270,10 +306,10 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
   /** The slot list of a node, as material names (registering materials it meets). */
   slotsOf(node: TransformNode): (string | null)[] {
     const recorded = metadataOf(node).bwMaterials ?? [];
-    if (!(node instanceof Mesh)) return recorded;
+    if (!(node instanceof this.api.Mesh)) return recorded;
     const material = node.material;
     if (!material) return recorded.map(() => null);
-    if (material instanceof MultiMaterial) return material.subMaterials.map((m) => (m ? this.nameOf(m) : null));
+    if (material instanceof this.api.MultiMaterial) return material.subMaterials.map((m) => (m ? this.nameOf(m) : null));
     return [this.nameOf(material)];
   }
 
@@ -282,13 +318,13 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
     const meta = metadataOf(node);
     meta.bwMaterials = [...names];
     node.metadata = meta;
-    if (!(node instanceof Mesh)) return;
+    if (!(node instanceof this.api.Mesh)) return;
     const materials = names.map((name) => (name ? this.materials.get(name) ?? null : null));
     if (materials.length <= 1) {
       node.material = materials[0] ?? null;
       return;
     }
-    const multi = node.material instanceof MultiMaterial ? node.material : new MultiMaterial(`${node.name}_slots`, this.scene);
+    const multi = node.material instanceof this.api.MultiMaterial ? node.material : new this.api.MultiMaterial(`${node.name}_slots`, this.scene);
     multi.subMaterials = materials;
     node.material = multi;
   }
@@ -346,7 +382,7 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
   private create(entity: EntityState, mesh: MeshData | undefined): TransformNode {
     const node = entity.kind === "mesh" && mesh
       ? this.buildMesh(entity.name, mesh)
-      : new TransformNode(entity.name, this.scene);
+      : new this.api.TransformNode(entity.name, this.scene);
     node.parent = this.root;
     this.register(node, entity.id, entity.kind);
     this.adapters.name.write(node, entity.name, this);
@@ -356,16 +392,16 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
   }
 
   private buildMesh(name: string, mesh: MeshData): Mesh {
-    const node = new Mesh(name, this.scene);
-    applyMesh(node, mesh);
+    const node = new this.api.Mesh(name, this.scene);
+    applyMesh(this.api, node, mesh);
     return node;
   }
 
   private replaceGeometry(id: string, mesh: MeshData): void {
     const node = this.node(id);
     if (!node) return;
-    if (node instanceof Mesh) {
-      applyMesh(node, mesh);
+    if (node instanceof this.api.Mesh) {
+      applyMesh(this.api, node, mesh);
       this.assignSlots(node, metadataOf(node).bwMaterials ?? []);
       return;
     }
@@ -374,7 +410,7 @@ export class BabylonSide implements EngineSide<TransformNode, Material> {
     replacement.metadata = node.metadata;
     replacement.parent = node.parent;
     replacement.position.copyFrom(node.position);
-    replacement.rotationQuaternion = node.rotationQuaternion?.clone() ?? Quaternion.FromEulerVector(node.rotation);
+    replacement.rotationQuaternion = node.rotationQuaternion?.clone() ?? this.api.Quaternion.FromEulerVector(node.rotation);
     replacement.scaling.copyFrom(node.scaling);
     replacement.setEnabled(node.isEnabled(false));
     for (const child of node.getChildren()) child.parent = replacement;
@@ -398,8 +434,30 @@ const isSlotList = (value: unknown): value is (string | null)[] =>
 
 const newId = (): string => crypto.randomUUID().replaceAll("-", "");
 
-/** Babylon vertex data (left-handed winding, bottom-left UVs) as glTF-space mesh data. */
-function canonicalFromVertexData(data: VertexData): MeshData {
+/** Conjugates a node's local transform by the project root's mirror in X. */
+function mirrorTransform(api: BabylonApi, node: TransformNode): void {
+  const r = node.rotationQuaternion ?? api.Quaternion.FromEulerVector(node.rotation);
+  node.position.x = -node.position.x;
+  node.rotationQuaternion = new api.Quaternion(r.x, -r.y, -r.z, r.w);
+}
+
+/** Vertex data a glTF loader produced (already glTF space) as mesh data, grouped by sub-mesh. */
+function canonicalFromGltf(data: VertexData, mesh: Mesh): MeshData {
+  const out = expand(data, false, false, false);
+  out.groups = mesh.subMeshes?.length ? mesh.subMeshes.map((sub) => [sub.materialIndex, sub.indexStart, sub.indexCount]) : out.groups;
+  return out;
+}
+
+/**
+ * Babylon-space vertex data (left-handed: clockwise front faces, bottom-left
+ * UVs) as glTF-space mesh data under the mirrored root: X mirrored,
+ * triangles reversed, V flipped.
+ */
+function canonicalFromBabylon(data: VertexData): MeshData {
+  return expand(data, true, true, true);
+}
+
+function expand(data: VertexData, mirrorX: boolean, reverse: boolean, flipV: boolean): MeshData {
   const positions = data.positions ?? [];
   const normals = data.normals ?? [];
   const uvs = data.uvs;
@@ -412,18 +470,21 @@ function canonicalFromVertexData(data: VertexData): MeshData {
     uvs: uvs ? new Float32Array(n * 2) : undefined,
     groups: [[0, 0, n]],
   };
+  const sx = mirrorX ? -1 : 1;
   for (let tri = 0; tri < n; tri += 3) {
-    // Reverse each triangle: Babylon's clockwise front faces are glTF's counter-clockwise.
-    const corners = [indices[tri], indices[tri + 2], indices[tri + 1]];
+    const corners = reverse
+      ? [indices[tri], indices[tri + 2], indices[tri + 1]]
+      : [indices[tri], indices[tri + 1], indices[tri + 2]];
     corners.forEach((vertex, k) => {
       const v = tri + k;
       for (let c = 0; c < 3; c++) {
-        out.positions[v * 3 + c] = positions[vertex * 3 + c];
-        out.normals[v * 3 + c] = normals[vertex * 3 + c];
+        const sign = c === 0 ? sx : 1;
+        out.positions[v * 3 + c] = sign * positions[vertex * 3 + c];
+        out.normals[v * 3 + c] = sign * (normals[vertex * 3 + c] ?? 0);
       }
       if (uvs && out.uvs) {
         out.uvs[v * 2] = uvs[vertex * 2];
-        out.uvs[v * 2 + 1] = 1 - uvs[vertex * 2 + 1];
+        out.uvs[v * 2 + 1] = flipV ? 1 - uvs[vertex * 2 + 1] : uvs[vertex * 2 + 1];
       }
     });
   }
@@ -431,8 +492,8 @@ function canonicalFromVertexData(data: VertexData): MeshData {
 }
 
 /** glTF-space mesh data onto a Babylon mesh, one sub-mesh per material group. */
-function applyMesh(node: Mesh, mesh: MeshData): void {
-  const data = new VertexData();
+function applyMesh(api: BabylonApi, node: Mesh, mesh: MeshData): void {
+  const data = new api.VertexData();
   data.positions = mesh.positions;
   data.normals = mesh.normals;
   if (mesh.uvs) {
@@ -444,20 +505,20 @@ function applyMesh(node: Mesh, mesh: MeshData): void {
   data.applyToMesh(node, true);
   // What Babylon's own glTF loader sets for glTF's counter-clockwise data under
   // the mirrored root in a left-handed scene (Babylon 9 orients per mesh).
-  node.sideOrientation = Material.ClockWiseSideOrientation;
+  node.sideOrientation = api.Material.ClockWiseSideOrientation;
   node.subMeshes = [];
   for (const [slot, start, count] of mesh.groups) {
-    new SubMesh(slot, 0, mesh.vertexCount, start, count, node);
+    new api.SubMesh(slot, 0, mesh.vertexCount, start, count, node);
   }
-  if (node.subMeshes.length === 0) node.subMeshes.push(new SubMesh(0, 0, mesh.vertexCount, 0, mesh.vertexCount, node));
+  if (node.subMeshes.length === 0) node.subMeshes.push(new api.SubMesh(0, 0, mesh.vertexCount, 0, mesh.vertexCount, node));
 }
 
 /** A project mesh's data as stored (already glTF space, unindexed or not). */
-function readMesh(node: Mesh): MeshData | null {
-  const positions = node.getVerticesData(VertexBuffer.PositionKind);
-  const normals = node.getVerticesData(VertexBuffer.NormalKind);
+function readMesh(api: BabylonApi, node: Mesh): MeshData | null {
+  const positions = node.getVerticesData(api.VertexBuffer.PositionKind);
+  const normals = node.getVerticesData(api.VertexBuffer.NormalKind);
   if (!positions || !normals) return null;
-  const uvs = node.getVerticesData(VertexBuffer.UVKind);
+  const uvs = node.getVerticesData(api.VertexBuffer.UVKind);
   const indices = node.getIndices() ?? Array.from({ length: positions.length / 3 }, (_, i) => i);
   const n = indices.length;
   const out: MeshData = {

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Shared helpers for cross-compiling Blender's dependencies to WASM.
 # Sourced by every scripts/build_<dep>.sh. All libs are built static with the
-# SAME ABI flags (pthreads + wasm-simd/SSE + exceptions) so they link together.
+# SAME ABI flags ($ABI_FLAGS from env.sh: pthreads + JS exceptions, or with
+# THREADS=0 no pthreads + wasm exceptions) so they link together.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-DL="$DEPS/downloads"
+DL="$DEPS_DOWNLOADS"
 SRC="$DEPS/src"
 BLD="$DEPS/build"
 
@@ -25,7 +26,7 @@ BLD="$DEPS/build"
 # side modules), which requires every input to be position-independent. PIC
 # objects link into the static browser builds just as well, so one sysroot
 # serves every flavour.
-WASM_CFLAGS="${WASM_CFLAGS:--O2 -pthread -msimd128 -fexceptions -fPIC}"
+WASM_CFLAGS="${WASM_CFLAGS:--O2 $ABI_FLAGS -msimd128 -fPIC}"
 WASM_CXXFLAGS="${WASM_CXXFLAGS:-$WASM_CFLAGS}"
 
 mkdir -p "$DL" "$SRC" "$BLD" "$SYSROOT"

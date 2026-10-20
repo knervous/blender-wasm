@@ -20,7 +20,8 @@
 #             serves requests from /ipc/request.json for as long as it lives:
 #             the scene stays in memory, a .blend is loaded or saved only when a
 #             request asks, and fingerprints are recomputed only for geometry
-#             the depsgraph reports changed. See serve().
+#             the depsgraph reports changed. See serve(). The single-threaded
+#             build polls from Blender's main between JSPI sleeps (poll()).
 #
 # NumPy buffers are 32-bit throughout: foreach_get/foreach_set and the binary
 # payloads are float32/int32, never the 64-bit defaults.
@@ -458,31 +459,44 @@ def load(spec):
     _forget()
 
 
+def poll():
+    """One server step: handles the pending request, if there is one. True if it did."""
+    if not os.path.exists(REQUEST):
+        return False
+    request = json.load(open(REQUEST))
+    os.remove(REQUEST)
+    # One request at a time, and /out is where a one-shot run (and so any
+    # job script) writes its files: start each request with it empty. The
+    # host collects everything under it after BW_DONE.
+    out = "/out"
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out, exist_ok=True)
+    try:
+        if request.get("load"):
+            load(request["load"])
+        handle(request["job"], out, save=request.get("save", False))
+    except BaseException:
+        json.dump({"error": traceback.format_exc()}, open(f"{out}/report.json", "w"))
+    print(f"<<<BW_DONE {request['id']}>>>", flush=True)
+    return True
+
+
 def serve():
     global TRACKING
     TRACKING = True
     bpy.app.handlers.depsgraph_update_post.append(_track_updates)
     bpy.app.handlers.load_post.append(_forget)
     print("<<<BW_READY>>>", flush=True)
+    if os.environ.get("BLENDER_WASM_POLL"):
+        # Single-threaded build: Blender's main runs BLENDER_WASM_POLL
+        # (`__bw_poll__()`) between JSPI sleeps, which hand the thread back to
+        # the worker's event loop. Return so the script ends and that loop starts.
+        import builtins
+        builtins.__bw_poll__ = poll
+        return
     while True:
-        if not os.path.exists(REQUEST):
+        if not poll():
             time.sleep(0.001)
-            continue
-        request = json.load(open(REQUEST))
-        os.remove(REQUEST)
-        # One request at a time, and /out is where a one-shot run (and so any
-        # job script) writes its files: start each request with it empty. The
-        # host collects everything under it after BW_DONE.
-        out = "/out"
-        shutil.rmtree(out, ignore_errors=True)
-        os.makedirs(out, exist_ok=True)
-        try:
-            if request.get("load"):
-                load(request["load"])
-            handle(request["job"], out, save=request.get("save", False))
-        except BaseException:
-            json.dump({"error": traceback.format_exc()}, open(f"{out}/report.json", "w"))
-        print(f"<<<BW_DONE {request['id']}>>>", flush=True)
 
 
 if globals().get("BW_SERVER"):

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "An example editor (Babylon.js or three.js) on @knervous/blender-web, with Blender running in the browser as WebAssembly",
+  "description": "An example editor (Babylon.js, Babylon Lite or three.js) on @knervous/blender-web, with Blender running in the browser as WebAssembly",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "sdk": "npm --prefix ../../packages/blender-web run build",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@babylonjs/core": "^9.31.0",
+    "@babylonjs/lite": "1.36.0",
     "@babylonjs/loaders": "^9.31.0",
     "@babylonjs/serializers": "^9.31.0",
     "@knervous/blender-web": "file:../../packages/blender-web",

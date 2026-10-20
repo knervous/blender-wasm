@@ -44,7 +44,10 @@ wave() {  # wave <name> <script...>
 }
 
 # Wave 1: no inter-deps.
-wave foundational zlib fmt imath zstd jpeg libdeflate robinmap yamlcpp expat pystring tbb eigen pugixml brotli
+# TBB is the thread pool: the single-threaded flavour (THREADS=0) builds
+# Blender WITH_TBB=OFF and has no use for it.
+TBB=tbb; [ "$THREADS" = 0 ] && TBB=
+wave foundational zlib fmt imath zstd jpeg libdeflate robinmap yamlcpp expat pystring $TBB eigen pugixml brotli
 # Wave 2: depend on wave 1.
 wave mid png minizip openjph tiff
 # Wave 3: FreeType (zlib + png + brotli). Blender's find_package(Freetype) is
@@ -62,9 +65,12 @@ wave oiio oiio
 # libshaderc_combined.a). Run one heavy build per wave (NOT parallel) so the
 # huge Tint/shaderc/glslang compiles don't OOM the runner. Tint clones Dawn and
 # must precede spirv_tools (which reuses Dawn's SPIRV-Tools source tree).
-wave tint    tint
-wave spirv   spirv_tools
-wave shaderc shaderc
+# GUI only, and the GUI is a pthread build: the single-threaded flavour is headless.
+if [ "$THREADS" = 1 ]; then
+  wave tint    tint
+  wave spirv   spirv_tools
+  wave shaderc shaderc
+fi
 
-echo "==== all deps built into wasm-sysroot ===="
+echo "==== all deps built into $SYSROOT ===="
 ls -1 "$SYSROOT"/lib/*.a

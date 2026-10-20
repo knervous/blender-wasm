@@ -19,7 +19,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 NUMPY_VERSION="${NUMPY_VERSION:-2.2.6}"
-WORK="$ROOT/numpy-build"
+WORK="$NUMPY_BUILD"
 VENV="$ROOT/.venv-numpy"
 SRC="$WORK/numpy-$NUMPY_VERSION"
 OUT="${OUT:-$WORK/dist}"
@@ -71,7 +71,9 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 
 # --- meson cross file (rendered from the template for this checkout) --------
-sed "s|@EM_BIN@|$EM_BIN|g" "$ROOT/cmake/emscripten-cross.ini.in" > "$CROSS"
+# The ABI flags as a meson list: '-pthread', '-fexceptions' (or the THREADS=0 set).
+ABI_LIST=$(printf "'%s', " $ABI_FLAGS); ABI_LIST="${ABI_LIST%, }"
+sed -e "s|@EM_BIN@|$EM_BIN|g" -e "s|@ABI_FLAGS@|$ABI_LIST|g" "$ROOT/cmake/emscripten-cross.ini.in" > "$CROSS"
 
 # The venv's bin comes first so meson finds `cython` — it treats Cython as a
 # compiler for the host machine and looks it up on PATH, not in the cross file.

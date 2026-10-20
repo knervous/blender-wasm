@@ -10,6 +10,7 @@
  * One mode per page load (?mode=sdk | ?mode=legacy), so heaps do not mix.
  * Results land in the table and on window.__bench.
  */
+import * as BABYLON from "@babylonjs/core";
 import {
   ArcRotateCamera, Color4, Engine, HemisphericLight, LoadAssetContainerAsync, Matrix, Quaternion, Scene, Vector3,
   type AssetContainer, type TransformNode,
@@ -187,7 +188,7 @@ async function legacy(runner: MeteredRunner): Promise<void> {
 }
 
 async function sdk(runner: MeteredRunner | MeteredSession): Promise<void> {
-  const side = new BabylonSide(scene);
+  const side = new BabylonSide(BABYLON, scene);
   const project = runner instanceof MeteredSession
     ? new Project({ session: runner, scene: side })
     : new Project({ blender: runner, scene: side });

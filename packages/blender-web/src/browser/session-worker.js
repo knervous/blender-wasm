@@ -6,7 +6,7 @@
  * no module instantiation, no Python start, no .blend load or save unless the
  * request asks.
  *
- * in:  { type: "boot", runtimeUrl, wasmModule, dataPackage, server }
+ * in:  { type: "boot", runtimeUrl, flavor, wasmModule, dataPackage, server }
  *      { type: "request", id, request, files, blend? }
  * out: { type: "phase", name, ms } (glueLoaded, instantiated, preRun, runtimeInitialized,
  *      firstLine, python) | { type: "ready", marks } | { type: "line", text }
@@ -125,7 +125,7 @@ self.onmessage = ({ data }) => {
     return;
   }
   if (data.type !== "boot") return;
-  const { runtimeUrl, wasmModule, dataPackage, server } = data;
+  const { runtimeUrl, flavor, wasmModule, dataPackage, server } = data;
   bootStart = performance.now();
   const fatal = (message) => self.postMessage({ type: "fatal", message: String(message) });
   try {
@@ -148,6 +148,9 @@ self.onmessage = ({ data }) => {
         FS = module.FS;
         module.ENV.BLENDER_SYSTEM_RESOURCES = "/5.3";
         module.ENV.HOME = "/tmp";
+        // Single-threaded build: Blender's main runs this between JSPI sleeps,
+        // which is when this worker's messages (requests) are handled.
+        if (flavor === "st") module.ENV.BLENDER_WASM_POLL = "__bw_poll__()";
         mkdirp("/ipc");
         FS.writeFile("/ipc/server.py", 'print("<<<BW_PYTHON>>>", flush=True)\nBW_SERVER = True\n' + server);
       }],

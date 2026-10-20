@@ -15,9 +15,11 @@ export interface Viewport<N> {
   readonly side: EngineSide<N, unknown>;
   /** Formats the engine opens by itself (outside the project). */
   readonly formats: string[];
-  /** The download the engine makes of its own scene. */
-  readonly nativeExport: { label: string; file: string };
-  start(): void;
+  /** The download the engine makes of its own scene, if it has one. */
+  readonly nativeExport?: { label: string; file: string };
+  /** Whether the viewport has transform gizmos. */
+  readonly gizmos?: boolean;
+  start(): void | Promise<void>;
   /** A tap on the canvas: the project entity or untracked root under it, or null. */
   onPick(listener: (node: N | null) => void): void;
   /** A gizmo drag or camera move ended (time to refresh and maybe auto-sync). */
@@ -31,7 +33,7 @@ export interface Viewport<N> {
   adoptUntracked(): string[];
   /** Deletes an untracked node. */
   disposeUntracked(node: N): void;
-  exportNative(): Promise<BlobPart>;
+  exportNative?(): Promise<BlobPart>;
   /** A new mesh with its own material, tracked into the project. */
   addPrimitive(kind: "box" | "sphere", color: Rgba): N;
   /** Deletes a node with the engine's API (an entity's deletion syncs). */

@@ -36,8 +36,8 @@ EM_ENV        := export ROOT="$(ROOT)" BLENDER_WASM_EMSDK="$(EMSDK)"; . "$(ROOT)
 # DEPS         : dep sources + build trees
 # BUILD_CYCLES : cmake build dir for cycles standalone
 # WEB          : html/js harness + final artifacts
-SYSROOT       := $(ROOT)/wasm-sysroot
-DEPS          := $(ROOT)/deps
+SYSROOT       ?= $(ROOT)/wasm-sysroot
+DEPS          ?= $(ROOT)/deps
 BUILD_CYCLES  := $(ROOT)/build-cycles
 BLENDER_BUILD ?= $(ROOT)/build-blender
 WEB           := $(ROOT)/web
@@ -46,7 +46,12 @@ NPROC         := $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.l
 # --- common compile flags for every wasm object (deps + blender) -----------
 # Keep these identical across all libraries or linking will fail: pthreads,
 # exceptions and SIMD must agree. SSE4.2 intrinsics are emulated onto wasm SIMD.
-WASM_CFLAGS   := -O2 -pthread -msimd128 -msse4.2 -fexceptions
+# ABI_FLAGS comes from scripts/env.sh via build.sh (THREADS=0 swaps it for the
+# single-threaded ABI); the default is the pthread one.
+ABI_FLAGS     ?= -pthread -fexceptions
+# Extra CMake options for the headless configure (THREADS=0: no TBB, no Cycles).
+HEADLESS_EXTRA ?=
+WASM_CFLAGS   := -O2 -msimd128 -msse4.2 $(ABI_FLAGS)
 WASM_CXXFLAGS := $(WASM_CFLAGS)
 
 .PHONY: all mvp toolchain blender blender-assets deps configure-cycles cycles cycles-web configure-blender blender-web verify-blender-webgpu web smoke serve verify verify-render verify-webgpu clean-build print-env
@@ -131,7 +136,7 @@ dep-%: toolchain
 # makes OpenImageIO's simd.h take an x86 SSE-intrinsic path (__m128i) that fails
 # on wasm. Cycles' own kernel files add per-file SIMD flags as needed. Plus the
 # wasm compat shim (uint/ushort).
-WASM_COMPAT := -pthread -fexceptions -include $(ROOT)/cmake/wasm_compat.h
+WASM_COMPAT := $(ABI_FLAGS) -include $(ROOT)/cmake/wasm_compat.h
 
 configure-cycles: toolchain blender deps
 	$(EM_ENV) "$(EMCMAKE)" cmake -S blender -B $(BUILD_CYCLES) -G Ninja \
@@ -179,11 +184,11 @@ configure-blender-headless: toolchain blender blender-assets deps dep-python
 	$(EM_ENV) "$(EMCMAKE)" cmake -S blender -B $(BLENDER_BUILD) -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_PREFIX_PATH="$(SYSROOT)" -DCMAKE_FIND_ROOT_PATH="$(SYSROOT)" \
-		-DCMAKE_C_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
-		-DCMAKE_CXX_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
+		-DCMAKE_C_FLAGS="$(WASM_COMPAT)" \
+		-DCMAKE_CXX_FLAGS="$(WASM_COMPAT)" \
 		-DWITH_HEADLESS=ON -DWITH_GHOST_WEB=OFF -DWITH_WEBGPU_BACKEND=OFF \
 		-DBLENDER_WASM_SYSROOT="$(SYSROOT)" \
-		-C $(ROOT)/cmake/blender-wasm-headless-cache.cmake
+		-C $(ROOT)/cmake/blender-wasm-headless-cache.cmake $(HEADLESS_EXTRA)
 
 blender-headless: configure-blender-headless
 	$(EM_ENV) ninja -C $(BLENDER_BUILD) blender

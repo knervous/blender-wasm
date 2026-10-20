@@ -29,20 +29,32 @@ for (const file of ["project/protocol.py", "browser/session-worker.js", "browser
 chmodSync(join(root, "dist/runtime/cli.js"), 0o755);
 console.log("built dist/");
 
-// The runtime: the glue, the brotli-compressed module and data, and the
-// manifest with every file's sha256 (compressed and raw).
-const source = process.env.BLENDER_WEB_RUNTIME_DIR ?? resolve(root, "../../dist/blender-wasm-browser");
-const runtime = join(root, "runtime");
+// The runtime, per flavour: the glue, the brotli-compressed module and data,
+// and the manifest with every file's sha256 (compressed and raw).
+//   mt  ./build.sh browser     (pthreads, cross-origin isolated pages)
+//   st  ./build.sh browser-st  (single-threaded with JSPI, any page)
+const SOURCES = {
+  mt: process.env.BLENDER_WEB_RUNTIME_MT ?? resolve(root, "../../dist/blender-wasm-browser"),
+  st: process.env.BLENDER_WEB_RUNTIME_ST ?? resolve(root, "../../dist/blender-wasm-browser-st"),
+};
 const RUNTIME_FILES = ["blender.js", "blender.wasm.br", "blender.data.br", "manifest.json"];
-if (RUNTIME_FILES.every((name) => existsSync(join(source, name)))) {
-  rmSync(runtime, { recursive: true, force: true });
-  mkdirSync(runtime);
-  for (const name of RUNTIME_FILES) copyFileSync(join(source, name), join(runtime, name));
-  const manifest = JSON.parse(readFileSync(join(runtime, "manifest.json"), "utf8"));
-  console.log(`runtime ${manifest.forkRevision} from ${source}`);
-} else if (process.argv.includes("--require-runtime")) {
-  console.error(`no runtime in ${source}: run ./build.sh browser first`);
-  process.exit(1);
-} else {
-  console.log(`no runtime in ${source} (./build.sh browser); built without one`);
+rmSync(join(root, "runtime"), { recursive: true, force: true });
+const missing = [];
+for (const [flavor, source] of Object.entries(SOURCES)) {
+  if (!RUNTIME_FILES.every((name) => existsSync(join(source, name)))) {
+    missing.push(`${flavor} (${source})`);
+    continue;
+  }
+  const out = join(root, "runtime", flavor);
+  mkdirSync(out, { recursive: true });
+  for (const name of RUNTIME_FILES) copyFileSync(join(source, name), join(out, name));
+  const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"));
+  console.log(`runtime ${flavor}: ${manifest.forkRevision} from ${source}`);
+}
+if (missing.length) {
+  if (process.argv.includes("--require-runtime")) {
+    console.error(`missing runtime flavours: ${missing.join(", ")}; run ./build.sh browser and ./build.sh browser-st`);
+    process.exit(1);
+  }
+  console.log(`built without runtime flavours: ${missing.join(", ")}`);
 }

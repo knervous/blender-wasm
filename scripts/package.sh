@@ -20,7 +20,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 FLAVOR="${1:-}"
-case "$FLAVOR" in node|browser|web) ;; *) die "usage: package.sh node|browser|web" ;; esac
+case "$FLAVOR" in node|browser|browser-st|web) ;; *) die "usage: package.sh node|browser|browser-st|web" ;; esac
 
 FORK_REV="$(git -C "$ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
 BLENDER_REV="$(git -C "$BLENDER_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -44,7 +44,7 @@ PKG="$DIST/blender-wasm-$FLAVOR"
 rm -rf "$PKG"; mkdir -p "$PKG"
 cp "$SRC/blender.js" "$PKG/"
 cp "$SRC/blender.wasm" "$SRC/blender.data" "$PKG/"
-if [ "$FLAVOR" = browser ]; then
+if [ "$FLAVOR" != node ]; then
   # Brotli only: browsers decode it natively (Content-Encoding: br) and Node's
   # zlib inflates it at install time.
   COMPRESS_ZSTD=0 bash "$ROOT/scripts/compress.sh" "$PKG/blender.wasm" "$PKG/blender.data"

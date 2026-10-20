@@ -3,17 +3,24 @@
  * a one-shot runner (a worker per run).
  *
  * Both load a served runtime directory (`runtimeUrl`, default
- * `blender-runtime/` under the page's base): blender.js, blender.wasm,
- * blender.data, manifest.json and this package's workers, as the Vite plugin
- * (`@knervous/blender-web/vite`) or `blender-web install <dir>` lay it out.
- * The page must be cross-origin isolated (COOP same-origin + COEP
- * require-corp): Blender's pthreads need SharedArrayBuffer.
+ * `blender-runtime/` under the page's base) as the Vite plugin
+ * (`@knervous/blender-web/vite`) or `blender-web install <dir>` lay it out:
+ * a manifest, this package's workers, and a directory per flavour.
+ *
+ *   mt  pthreads. Needs a cross-origin isolated page (COOP same-origin + COEP
+ *       require-corp): the threads need SharedArrayBuffer.
+ *   st  single-threaded, with JSPI: Blender runs on the worker's own thread
+ *       and hands it back between requests. Any page.
+ *
+ * `threads: "auto"` (the default) takes mt where the page is isolated and st
+ * everywhere else.
  */
 import type { BlenderJob, BlenderRunner, BlenderSession } from "../project/index.ts";
 import { PROTOCOL_SOURCE } from "../project/protocol.generated.ts";
 
-export interface RuntimeManifest {
-  flavor?: string;
+export type Flavor = "mt" | "st";
+
+export interface FlavorManifest {
   forkRevision: string;
   blenderRevision?: string;
   wasmOpt: string;
@@ -21,16 +28,35 @@ export interface RuntimeManifest {
   raw?: Record<string, { bytes: number; sha256: string }>;
 }
 
+export interface RuntimeManifest {
+  forkRevision: string;
+  flavors: Partial<Record<Flavor, FlavorManifest>>;
+}
+
+/** Which build to run: "auto" takes mt on a cross-origin isolated page and st elsewhere. */
+export type ThreadsOption = "auto" | boolean;
+
 /** Where the Vite plugin and `blender-web install` put the runtime, relative to the page. */
 export const DEFAULT_RUNTIME_URL = "blender-runtime/";
 
-/** Blender's threads need SharedArrayBuffer, which only a cross-origin isolated page has. */
+/** The pthread build needs SharedArrayBuffer, which only a cross-origin isolated page has. */
 export class NotIsolatedError extends Error {
   constructor() {
-    super("This page is not cross-origin isolated, so Blender's threads cannot start. Serve it with "
-      + "Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp "
-      + "(the Vite plugin does), or use a COI service worker on static hosts.");
+    super("This page is not cross-origin isolated, so the pthread build of Blender cannot start. Serve it "
+      + "with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp "
+      + "(the Vite plugin does), or use `threads: \"auto\"` / `false` for the single-threaded build.");
   }
+}
+
+/** The flavour `threads` asks for, given the page and what the runtime directory holds. */
+export function pickFlavor(manifest: RuntimeManifest, threads: ThreadsOption = "auto"): Flavor {
+  const wanted: Flavor = threads === "auto" ? (isolated() && manifest.flavors.mt ? "mt" : "st") : threads ? "mt" : "st";
+  if (wanted === "mt" && !isolated()) throw new NotIsolatedError();
+  if (!manifest.flavors[wanted]) {
+    const has = Object.keys(manifest.flavors).join(", ") || "none";
+    throw new Error(`The runtime has no ${wanted === "mt" ? "pthread (mt)" : "single-threaded (st)"} build (it has: ${has})`);
+  }
+  return wanted;
 }
 
 const isolated = (): boolean => typeof crossOriginIsolated === "boolean" ? crossOriginIsolated : false;
@@ -92,11 +118,16 @@ async function fetchCounted(url: string, size: number | undefined, onBytes: (del
   return new Response(counted, { headers: { "content-type": response.headers.get("content-type") ?? "" } });
 }
 
-/** Fetch blender.wasm (compiling while it streams) and blender.data, reporting bytes. */
-async function loadRuntime(runtimeUrl: string, report: (p: BootProgress) => void) {
-  if (!isolated()) throw new NotIsolatedError();
-  const manifest = await runtimeInstalled(runtimeUrl);
-  if (!manifest) throw new Error(`No Blender runtime at ${runtimeUrl} (manifest.json missing)`);
+/**
+ * Fetch one flavour's blender.wasm (compiling while it streams) and
+ * blender.data, reporting bytes. Returns the flavour's directory URL too.
+ */
+async function loadRuntime(runtimeUrl: string, threads: ThreadsOption, report: (p: BootProgress) => void) {
+  const runtime = await runtimeInstalled(runtimeUrl);
+  if (!runtime) throw new Error(`No Blender runtime at ${runtimeUrl} (manifest.json missing)`);
+  const flavor = pickFlavor(runtime, threads);
+  const manifest: Partial<FlavorManifest> = runtime.flavors[flavor] ?? {};
+  const flavorUrl = `${runtimeUrl}${flavor}/`;
   const totals = { wasm: 0, data: 0 };
   const loaded = { wasm: 0, data: 0 };
   const emit = () => {
@@ -109,15 +140,15 @@ async function loadRuntime(runtimeUrl: string, report: (p: BootProgress) => void
     loaded[key] += delta;
     emit();
   };
-  const wasm = fetchCounted(runtimeUrl + "blender.wasm", manifest.raw?.["blender.wasm"]?.bytes, count("wasm")).then((response) => {
+  const wasm = fetchCounted(flavorUrl + "blender.wasm", manifest.raw?.["blender.wasm"]?.bytes, count("wasm")).then((response) => {
     // compileStreaming needs the wasm media type on the (re-wrapped) response.
     const typed = new Response(response.body, { headers: { "content-type": "application/wasm" } });
     return WebAssembly.compileStreaming(typed);
   });
-  const data = fetchCounted(runtimeUrl + "blender.data", manifest.raw?.["blender.data"]?.bytes, count("data")).then((r) => r.arrayBuffer());
+  const data = fetchCounted(flavorUrl + "blender.data", manifest.raw?.["blender.data"]?.bytes, count("data")).then((r) => r.arrayBuffer());
   const [wasmModule, dataPackage] = await Promise.all([wasm, data]);
   report({ phase: "compile", fraction: 0.5, loaded: loaded.wasm + loaded.data, total: totals.wasm + totals.data, detail: "compiled" });
-  return { wasmModule, dataPackage };
+  return { wasmModule, dataPackage, flavor, flavorUrl };
 }
 
 /* ----------------------------------------------------------------- session */
@@ -126,6 +157,8 @@ export interface BlenderSessionOptions {
   runtimeUrl?: string | URL;
   /** The session worker script (default: session-worker.js in the runtime directory). */
   workerUrl?: string | URL;
+  /** Which build to run (default "auto": pthreads where the page is isolated, else single-threaded). */
+  threads?: ThreadsOption;
   /** protocol.py source; defaults to the one shipped with this package. */
   server?: string;
   onProgress?: (progress: BootProgress) => void;
@@ -140,6 +173,8 @@ export interface BrowserBlenderSession extends BlenderSession {
   readonly startMs: number;
   /** Worker phase marks, ms since it received the boot message. */
   readonly phases: Record<string, number>;
+  /** The build that booted (after boot). */
+  readonly flavor: Flavor | null;
   /** Ends the worker (and Blender); the next request boots a new one. */
   close(): void;
 }
@@ -198,7 +233,8 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
     booting = null;
   };
 
-  const session: BrowserBlenderSession & { bootMs: number; compileMs: number; startMs: number; phases: Record<string, number> } = {
+  const session: BrowserBlenderSession & { bootMs: number; compileMs: number; startMs: number; phases: Record<string, number>; flavor: Flavor | null } = {
+    flavor: null,
     bootMs: 0,
     compileMs: 0,
     startMs: 0,
@@ -207,7 +243,8 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
       booting ??= (async () => {
         const started = performance.now();
         fraction = 0;
-        const { wasmModule, dataPackage } = await loadRuntime(runtimeUrl, progress);
+        const { wasmModule, dataPackage, flavor, flavorUrl } = await loadRuntime(runtimeUrl, options.threads ?? "auto", progress);
+        session.flavor = flavor;
         session.compileMs = performance.now() - started;
         const w = startWorker(String(options.workerUrl ?? runtimeUrl + "session-worker.js"));
         worker = w;
@@ -236,7 +273,7 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
               reject(error);
             }
           };
-          w.postMessage({ type: "boot", runtimeUrl, wasmModule, dataPackage, server }, [dataPackage]);
+          w.postMessage({ type: "boot", runtimeUrl: flavorUrl, flavor, wasmModule, dataPackage, server }, [dataPackage]);
         });
       })().catch((error: unknown) => {
         // A failed boot (no runtime, not isolated, an abort) is retried by the next call.
@@ -299,6 +336,7 @@ export class BlenderPythonError extends Error {
 
 export interface BlenderRunnerOptions {
   runtimeUrl?: string | URL;
+  threads?: ThreadsOption;
   workerUrl?: string | URL;
   onProgress?: (progress: BootProgress) => void;
 }
@@ -313,8 +351,8 @@ export function createBlenderRunner(options: BlenderRunnerOptions = {}): Blender
   let assets: ReturnType<typeof loadRuntime> | undefined;
   return {
     async run({ code, blendFile, files, onLine = () => {} }) {
-      assets ??= loadRuntime(runtimeUrl, options.onProgress ?? (() => {}));
-      const { wasmModule, dataPackage } = await assets;
+      assets ??= loadRuntime(runtimeUrl, options.threads ?? "auto", options.onProgress ?? (() => {}));
+      const { wasmModule, dataPackage, flavorUrl } = await assets;
       const staged = { ...files, "/job/main.py": encoder.encode(WRAPPER), "/job/user.py": encoder.encode(code) };
       const worker = startWorker(String(options.workerUrl ?? runtimeUrl + "run-worker.js"));
       try {
@@ -326,7 +364,7 @@ export function createBlenderRunner(options: BlenderRunnerOptions = {}): Blender
             else if (data.type === "error") reject(Object.assign(new Error(data.message), { output: data.output }));
           };
           worker.postMessage({
-            runtimeUrl,
+            runtimeUrl: flavorUrl,
             wasmModule,
             // The run's module consumes its copy; keep the original for the next run.
             dataPackage: dataPackage.slice(0),

@@ -20,11 +20,25 @@ EMSDK="${BLENDER_WASM_EMSDK:-$ROOT/emsdk}"
 EM_BIN="$EMSDK/upstream/emscripten"
 BINARYEN_BIN="$EMSDK/upstream/bin"
 
-SYSROOT="${SYSROOT:-$ROOT/wasm-sysroot}"
-DEPS="${DEPS:-$ROOT/deps}"
+# THREADS=1 (default): the pthread ABI (-pthread, JS-based exceptions), for
+# cross-origin isolated pages. THREADS=0: the single-threaded ABI (no
+# -pthread; native wasm exceptions and setjmp/longjmp, which JSPI needs to
+# suspend through C++ frames), for any page. Objects of the two ABIs cannot
+# link together, so THREADS=0 has its own sysroot, deps, numpy and Blender
+# build tree (the "-st" suffix); downloads are shared.
+THREADS="${THREADS:-1}"
+case "$THREADS" in
+  1) ST="";    ABI_FLAGS="-pthread -fexceptions" ;;
+  0) ST="-st"; ABI_FLAGS="-fwasm-exceptions -sSUPPORT_LONGJMP=wasm" ;;
+  *) echo "THREADS must be 1 or 0" >&2; exit 2 ;;
+esac
+SYSROOT="${SYSROOT:-$ROOT/wasm-sysroot$ST}"
+DEPS="${DEPS:-$ROOT/deps$ST}"
+DEPS_DOWNLOADS="${DEPS_DOWNLOADS:-$ROOT/deps/downloads}"
+NUMPY_BUILD="${NUMPY_BUILD:-$ROOT/numpy-build$ST}"
 # The Makefile clones Blender into blender/; scripts read it from here.
 BLENDER_SRC="$ROOT/blender"
-BLENDER_BUILD="${BLENDER_BUILD:-$ROOT/build-blender}"
+BLENDER_BUILD="${BLENDER_BUILD:-$ROOT/build-blender$ST}"
 DIST="${DIST:-$ROOT/dist}"
 
 HOST_OS="$(uname -s)"
@@ -81,7 +95,8 @@ fi
 export PATH="${GNU_PATH#:}${GNU_PATH:+:}$EM_BIN:$PATH"
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
-export ROOT EMSDK EMSDK_VERSION EM_BIN BINARYEN_BIN SYSROOT DEPS BLENDER_SRC BLENDER_BUILD DIST NPROC HOST_OS
+export ROOT EMSDK EMSDK_VERSION EM_BIN BINARYEN_BIN SYSROOT DEPS DEPS_DOWNLOADS NUMPY_BUILD BLENDER_SRC BLENDER_BUILD DIST NPROC HOST_OS
+export THREADS ST ABI_FLAGS
 
 # Blender's data-file version directory (scripts/, datafiles/ live under it).
 BLENDER_VERSION_DIR="${BLENDER_VERSION_DIR:-5.3}"

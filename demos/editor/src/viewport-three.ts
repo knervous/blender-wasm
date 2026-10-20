@@ -1,3 +1,4 @@
+import * as THREE from "three";
 import {
   BoxGeometry, Color, DirectionalLight, GridHelper, HemisphereLight, Mesh, MeshBasicMaterial, MeshStandardMaterial,
   Object3D, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, SphereGeometry, Vector2, WebGLRenderer,
@@ -8,7 +9,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
-import { ThreeSide, defaultMaterialAdapter } from "@knervous/blender-web/three";
+import { ThreeSide } from "@knervous/blender-web/three";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
 export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3D> & { scene: Scene } {
@@ -28,7 +29,8 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
   const grid = new GridHelper(20, 20, 0x525259, 0x3a3a3f);
   scene.add(grid);
 
-  const side = new ThreeSide(scene);
+  // The adapter uses this app's three.js.
+  const side = new ThreeSide(THREE, scene);
   /** Materials made here and not yet on a tracked mesh (so not yet project materials). */
   const created = new Map<string, MeshStandardMaterial>();
   /** Content loaded into three.js outside the project (until adopted). */
@@ -94,6 +96,7 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
     engine: "three.js",
     scene,
     side,
+    gizmos: true,
     formats: ["glb", "gltf", "obj", "stl"],
     nativeExport: { label: "three .glb", file: "scene-three.glb" },
     start() {
@@ -140,7 +143,7 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
     addPrimitive(kind, color) {
       const name = `${kind}_${Math.random().toString(16).slice(2, 6)}`;
       const material = new MeshStandardMaterial({ name: `${name}_material` });
-      defaultMaterialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
+      side.materialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
       const mesh = new Mesh(kind === "box" ? new BoxGeometry(1, 1, 1) : new SphereGeometry(0.5, 32, 16), material);
       mesh.name = name;
       scene.add(mesh);
@@ -160,13 +163,13 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
     },
     createMaterial(name, state) {
       const material = new MeshStandardMaterial({ name });
-      defaultMaterialAdapter.write(material, state);
+      side.materialAdapter.write(material, state);
       created.set(material.name, material);
       return material.name;
     },
     editMaterial(name, state) {
       const material = side.material(name);
-      if (material) defaultMaterialAdapter.write(material, state);
+      if (material) side.materialAdapter.write(material, state);
     },
     decorate() {
       for (const [id, entity] of Object.entries(side.read())) {

@@ -4,6 +4,9 @@
 #   ./build.sh doctor     check host prerequisites
 #   ./build.sh node       headless runtime for Node     -> dist/blender-wasm-node/
 #   ./build.sh browser    headless runtime for workers  -> dist/blender-wasm-browser/
+#                         (pthreads: needs a cross-origin isolated page)
+#   ./build.sh browser-st single-threaded headless runtime (no pthreads, JSPI)
+#                         for any page                   -> dist/blender-wasm-browser-st/
 #   ./build.sh web        full GUI (WebGPU) demo site   -> demo/dist, dist/blender-web-*.tar.gz
 #
 # Each flavour runs every step it needs and skips the ones already done, so the
@@ -38,12 +41,14 @@
 #                       DEP_JOBS=2 NPROC=6 keeps a laptop usable)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# browser-st is the single-threaded ABI end to end (scripts/env.sh).
+[ "${1:-}" = browser-st ] && export THREADS=0
 source scripts/env.sh
 
 OPTIMIZE="${OPTIMIZE:-1}"
 export WASM_OPT_LEVEL="${WASM_OPT_LEVEL:--O2}"
 FORCE="${FORCE:-0}"
-STAMPS="$ROOT/.stamps"
+STAMPS="$ROOT/.stamps$ST"
 mkdir -p "$STAMPS"
 
 # make's `deps` is phony and dep-python matches the dep-% pattern rule, so plain
@@ -52,7 +57,12 @@ mkdir -p "$STAMPS"
 MAKE_SKIP=(-o toolchain -o deps -o dep-python -o blender -o blender-assets)
 
 # Every make call sees the same emsdk and build tree as the scripts.
-mk() { make EMSDK="$EMSDK" BLENDER_BUILD="$BLENDER_BUILD" "$@"; }
+mk() {
+  local extra=""
+  [ "$THREADS" = 0 ] && extra="-DWITH_TBB=OFF -DWITH_CYCLES=OFF"
+  make EMSDK="$EMSDK" BLENDER_BUILD="$BLENDER_BUILD" SYSROOT="$SYSROOT" DEPS="$DEPS" \
+    ABI_FLAGS="$ABI_FLAGS" HEADLESS_EXTRA="$extra" "$@"
+}
 
 stamped() { [ "$FORCE" != 1 ] && [ -f "$STAMPS/$1" ]; }
 stamp() { date -u +%FT%TZ > "$STAMPS/$1"; }
@@ -128,8 +138,21 @@ deps() {
 
 numpy() {
   deps
-  if [ "$FORCE" != 1 ] && ls "$ROOT"/numpy-build/dist/*.whl >/dev/null 2>&1; then return 0; fi
+  if [ "$FORCE" != 1 ] && ls "$NUMPY_BUILD"/dist/*.whl >/dev/null 2>&1; then return 0; fi
   step numpy; bash scripts/build_numpy.sh
+}
+
+# patches/blender/: this repository's changes to the Blender fork, each guarded
+# so it only acts in the build it is for (BLI_THREADS_INLINE: the
+# single-threaded one). Applied once; a patch already in the tree is skipped.
+blender_patches() {
+  local p
+  for p in "$ROOT"/patches/blender/*.patch; do
+    [ -f "$p" ] || continue
+    if git -C "$BLENDER_SRC" apply --reverse --check "$p" 2>/dev/null; then continue; fi
+    log "applying $(basename "$p")"
+    git -C "$BLENDER_SRC" apply "$p" || die "$(basename "$p") does not apply to $BLENDER_SRC"
+  done
 }
 
 configure() {
@@ -140,7 +163,7 @@ configure() {
     gui)      marker='^WITH_WEBGPU_BACKEND:BOOL=ON';  target=configure-blender ;;
     *) die "configure headless|gui" ;;
   esac
-  toolchain; source_tree; deps
+  toolchain; source_tree; deps; blender_patches
   if [ "$FORCE" != 1 ] && grep -q "$marker" "$BLENDER_BUILD/CMakeCache.txt" 2>/dev/null; then
     return 0
   fi
@@ -172,9 +195,9 @@ link() {
   local flavor="$1"
   step "link $flavor"
   case "$flavor" in
-    node|browser) TARGET="$flavor" bash scripts/link_blender_headless.sh ;;
+    node|browser|browser-st) TARGET="$flavor" bash scripts/link_blender_headless.sh ;;
     web) OPTIMIZE="$OPTIMIZE" bash scripts/link_blender_release.sh ;;
-    *) die "link node|browser|web" ;;
+    *) die "link node|browser|browser-st|web" ;;
   esac
 }
 
@@ -188,7 +211,7 @@ flavor() {
   local flavor="$1"
   doctor
   case "$flavor" in
-    node|browser)
+    node|browser|browser-st)
       numpy
       configure headless; compile
       link "$flavor"
@@ -209,17 +232,17 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   doctor)    doctor ;;
-  node|browser|web) flavor "$cmd" ;;
+  node|browser|browser-st|web) flavor "$cmd" ;;
   toolchain) toolchain ;;
   source)    source_tree ;;
   deps)      deps ;;
   numpy)     numpy ;;
   configure) configure "${1:?configure headless|gui}" ;;
   compile)   compile ;;
-  link)      link "${1:?link node|browser|web}" ;;
+  link)      link "${1:?link node|browser|browser-st|web}" ;;
   optimize)  [ $# -ge 1 ] || die "optimize <dir-or-wasm>"; OPTIMIZE=1 optimize "$@" ;;
   compress)  bash scripts/compress.sh "$@" ;;
-  package)   bash scripts/package.sh "${1:?package node|browser|web}" ;;
+  package)   bash scripts/package.sh "${1:?package node|browser|browser-st|web}" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac

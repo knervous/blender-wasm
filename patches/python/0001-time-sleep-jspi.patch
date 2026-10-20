@@ -1,0 +1,25 @@
+--- a/Modules/timemodule.c	2026-10-20 09:43:46
++++ b/Modules/timemodule.c	2026-10-20 09:43:46
+@@ -2217,10 +2217,22 @@
+ // time.sleep() implementation.
+ // On error, raise an exception and return -1.
+ // On success, return 0.
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++#include <emscripten.h>
++#endif
++
+ static int
+ pysleep(PyTime_t timeout)
+ {
+     assert(timeout >= 0);
++
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++    /* Single-threaded WebAssembly built with JSPI: sleep by suspending to the
++     * JavaScript event loop, so the page (or worker) hosting this Python keeps
++     * running while it waits. A busy wait would freeze the only thread. */
++    emscripten_sleep((unsigned int)_PyTime_AsMilliseconds(timeout, _PyTime_ROUND_CEILING));
++    return PyErr_CheckSignals();
++#endif
+ 
+ #ifndef MS_WINDOWS
+ #ifdef HAVE_CLOCK_NANOSLEEP

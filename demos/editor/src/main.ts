@@ -25,7 +25,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string, type?: new () => T):
   return element as T;
 };
 
-const ENGINES = { babylon: "Babylon.js", three: "three.js" } as const;
+const ENGINES = { babylon: "Babylon.js", lite: "Babylon Lite", three: "three.js" } as const;
 type EngineKey = keyof typeof ENGINES;
 const isEngine = (value: string | null): value is EngineKey => value !== null && value in ENGINES;
 
@@ -401,8 +401,15 @@ function editor<N extends object>(view: Viewport<N>): void {
     if (glb) download("scene.glb", ownBytes(glb), "model/gltf-binary");
     return result;
   });
-  $("dl-native").textContent = view.nativeExport.label;
-  $("dl-native").onclick = async () => download(view.nativeExport.file, await view.exportNative(), "application/octet-stream");
+  const nativeExport = view.nativeExport;
+  $("dl-native").hidden = !nativeExport || !view.exportNative;
+  if (nativeExport) {
+    $("dl-native").textContent = nativeExport.label;
+    $("dl-native").onclick = async () => {
+      if (view.exportNative) download(nativeExport.file, await view.exportNative(), "application/octet-stream");
+    };
+  }
+  $("gizmo-modes").hidden = !view.gizmos;
 
   /* Boot progress: bytes while downloading, then Blender's start phases. */
   function showBootProgress(progress: BootProgress): void {
@@ -415,11 +422,7 @@ function editor<N extends object>(view: Viewport<N>): void {
   }
 
   async function boot(): Promise<void> {
-    view.start();
-    if (!crossOriginIsolated) {
-      setStatus("This page is not cross-origin isolated (COOP/COEP); Blender's threads cannot start.", "error");
-      return;
-    }
+    await view.start();
     const uiInstalled = await fetch("blender-ui/manifest.json", { cache: "no-store" })
       .then((r) => r.ok && (r.headers.get("content-type") ?? "").includes("json"), () => false);
     $("ui-open", HTMLButtonElement).disabled = !uiInstalled;
@@ -432,8 +435,10 @@ function editor<N extends object>(view: Viewport<N>): void {
       refresh();
       return;
     }
-    $("runtime").textContent = `WebAssembly in this tab · build ${manifest.forkRevision}`;
-    const session = createBlenderSession({ onProgress: showBootProgress });
+    // ?threads=1|0 forces the pthread or single-threaded build; "auto" picks by isolation.
+    const forced = new URLSearchParams(location.search).get("threads");
+    const threads = forced === "1" ? true : forced === "0" ? false : "auto";
+    const session = createBlenderSession({ threads, onProgress: showBootProgress });
     project = new Project({
       session,
       scene: side,
@@ -441,7 +446,9 @@ function editor<N extends object>(view: Viewport<N>): void {
       onLine: (line) => { if (line.trim() && !line.startsWith("<<<")) log(line); },
     });
     await blenderTask("New Blender scene", (p) => p.newScene());
-    log(`[session] Blender booted once in ${(session.bootMs / 1000).toFixed(1)} s; requests reuse it`);
+    const flavor = session.flavor === "mt" ? "pthreads" : "single-threaded (JSPI)";
+    $("runtime").textContent = `WebAssembly in this tab · ${flavor} · build ${manifest.forkRevision}`;
+    log(`[session] Blender (${flavor}) booted once in ${(session.bootMs / 1000).toFixed(1)} s; requests reuse it`);
   }
 
   void boot();
@@ -467,6 +474,9 @@ const canvas = $("viewport", HTMLCanvasElement);
 if (engineKey === "three") {
   const { createThreeViewport } = await import("./viewport-three.ts");
   editor(createThreeViewport(canvas));
+} else if (engineKey === "lite") {
+  const { createLiteViewport } = await import("./viewport-lite.ts");
+  editor(await createLiteViewport(canvas));
 } else {
   const { createBabylonViewport } = await import("./viewport-babylon.ts");
   editor(createBabylonViewport(canvas));
