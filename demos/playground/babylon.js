@@ -1,12 +1,9 @@
 // Blender inside the Babylon.js Playground (https://playground.babylonjs.com).
 // Blender runs as WebAssembly in a worker; @knervous/blender-web keeps it and
 // this scene in step. Click a mesh to nudge it: the move syncs to Blender.
-import { Project } from "@knervous/blender-web@0.0.2";
-import { createBlenderSession } from "@knervous/blender-web@0.0.2/browser";
-import { BabylonSide } from "@knervous/blender-web@0.0.2/babylon";
 
-// The runtime ships in the package; the CDN serves it as-is. Keep its
-// version the same as the imports'.
+// The package from esm.sh, and its runtime from jsDelivr (keep the versions equal).
+const PKG = "https://esm.sh/@knervous/blender-web@0.0.2";
 const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/";
 
 export const createScene = async function () {
@@ -18,17 +15,22 @@ export const createScene = async function () {
     // Boot progress on screen (the playground page isn't cross-origin
     // isolated, so this is the single-threaded build).
     const label = Object.assign(document.createElement("div"), { style: "position:absolute;top:8px;left:8px;color:#ddd;font:13px sans-serif" });
-    canvas.parentElement!.append(label);
+    canvas.parentElement.append(label);
 
-    // The project: Blender on one side, this scene (via the playground's own BABYLON) on the other.
-    const side = new BabylonSide(BABYLON, scene);
-    const session = createBlenderSession({
-        runtimeUrl: RUNTIME,
-        onProgress: (p) => { label.textContent = `Blender: ${p.detail} ${Math.round(p.fraction * 100)}%`; },
-    });
-    const project = new Project({ session, scene: side });
-
+    // Blender boots after the scene is returned, so the playground never waits on it.
+    let side = null;
+    let project = null;
     void (async () => {
+        const [{ Project }, { createBlenderSession }, { BabylonSide }] = await Promise.all([
+            import(PKG), import(`${PKG}/browser`), import(`${PKG}/babylon`),
+        ]);
+        // The project: Blender on one side, this scene (via the playground's own BABYLON) on the other.
+        side = new BabylonSide(BABYLON, scene);
+        const session = createBlenderSession({
+            runtimeUrl: RUNTIME,
+            onProgress: (p) => { label.textContent = `Blender: ${p.detail} ${Math.round(p.fraction * 100)}%`; },
+        });
+        project = new Project({ session, scene: side });
         await project.newScene(); // Blender's startup cube, light and camera arrive as Babylon nodes
 
         // Blender models: a smooth monkey with an array, in orange.
@@ -47,7 +49,7 @@ m.data.materials.append(mat)
 
     // Babylon edits: move what you click, then sync (only that change crosses).
     scene.onPointerObservable.add(async (info) => {
-        if (info.type !== BABYLON.PointerEventTypes.POINTERTAP) return;
+        if (!project || info.type !== BABYLON.PointerEventTypes.POINTERTAP) return;
         const node = side.entityOf(info.pickInfo?.pickedMesh ?? null);
         if (!node) return;
         node.position.y += 0.5;
