@@ -294,6 +294,19 @@ export class BabylonSide implements SceneSide {
     node.dispose(true);
   }
 
+  /** Edit a material's properties (or create it); every entity using it changes. */
+  setMaterial(name: string, state: MaterialState): void {
+    this.upsertMaterial(name, state);
+  }
+
+  materialNames(): string[] {
+    return [...this.materialStates.keys()].sort();
+  }
+
+  materialState(name: string): MaterialState | undefined {
+    return this.materialStates.get(name);
+  }
+
   private upsertMaterial(name: string, state: MaterialState): void {
     let material = this.materials.get(name);
     if (!material) {

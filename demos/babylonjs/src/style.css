@@ -68,3 +68,8 @@ label.inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
 #outliner li .state { margin-left: 6px; font-size: 11px; color: var(--accent); }
 #outliner li.untracked { color: var(--muted); }
 #outliner li.untracked::after { content: " · Babylon only"; color: var(--accent-2); font-size: 11px; }
+
+.material { border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; margin: 4px 0 6px; }
+.material[hidden] { display: none; }
+.material select { padding: 2px 4px; }
+.material input[type="range"] { width: 70px; }

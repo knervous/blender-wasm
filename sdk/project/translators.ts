@@ -1,4 +1,4 @@
-import type { Field, Transform } from "./types.ts";
+import type { Field, MaterialState, Transform } from "./types.ts";
 
 /**
  * How one field crosses between the sides. Values are already in the shared
@@ -47,3 +47,22 @@ export function defaultTranslators(): Record<Field, FieldTranslator> {
     materials: materialsTranslator,
   };
 }
+
+/**
+ * How a material's properties cross. Material assignment (which material sits
+ * in each slot) is the `materials` field and uses a FieldTranslator; this one
+ * covers the properties of a material itself. Replace it with
+ * `ProjectPlugin.materialTranslator`.
+ */
+export interface MaterialTranslator {
+  equal(a: MaterialState, b: MaterialState): boolean;
+  /** Shape the properties Blender's writer receives (default: unchanged). */
+  toBlender?(value: MaterialState): MaterialState;
+  /** Shape the properties the scene's writer receives (default: unchanged). */
+  toScene?(value: MaterialState): MaterialState;
+}
+
+export const materialPropertiesTranslator: MaterialTranslator = {
+  equal: (a, b) =>
+    vectorsEqual(a.color, b.color) && nearlyEqual(a.metallic, b.metallic) && nearlyEqual(a.roughness, b.roughness),
+};

@@ -2,9 +2,10 @@
 
 A small Babylon.js editor with Blender running in the same tab, compiled to
 WebAssembly. Open a `.blend` (or anything Blender imports) and edit it in
-Babylon. Your moves and deletions push back onto the Blender objects. You can
-also run `bpy` against the scene, or load Babylon content and send the whole
-Babylon scene into Blender.
+Babylon: moves, deletions, new objects, material assignment and material
+colour/metallic/roughness sync back onto the Blender objects. You can also
+run `bpy` against the scene, adopt Babylon content into the project, or edit
+in Blender's own UI.
 
 ```bash
 npm install
@@ -46,6 +47,7 @@ Babylon's glTF loader builds, so a `.blend` looks the way its glTF export would.
 |---|---|
 | New Blender scene / Open | The file becomes the project, and its objects arrive as creates. A `.blend` opens as-is; `.glb/.gltf/.obj/.fbx/.stl/.ply` are imported into an empty scene. |
 | Move, rotate, scale, delete, Add box/sphere | Listed under **Sync** as pending changes, typed and per object. |
+| Material panel (selected mesh) | Pick the material in slot 0, make a **New** one, or edit its colour, metallic and roughness. The material is shared by everything using it, and both the assignment and the properties are pending changes. |
 | **Sync with Blender** | Just those changes go out (create with mesh data, delete, update one field). What comes back is only what Blender changed beyond them. *Auto-sync* sends them shortly after each edit. |
 | **Run Python** | A sync, plus a `bpy` script; only what the script changed comes back. |
 | Open `.babylon`/USD (or Shift+open a glTF/OBJ/STL) | Loaded into Babylon outside the project ("Babylon only"). **Adopt Babylon content** brings it in, keeping its placement; the next sync creates it in Blender. |
@@ -59,7 +61,9 @@ The status line and log show each sync's traffic, for example
 - No OpenSubdiv, so Subdivision Surface does nothing. Array, Bevel, Mirror and
   the other non-subdivision modifiers work.
 - Each sync is one Blender run, about 4 s, mostly Blender's startup.
-- Material and mesh edits made in Babylon travel only when an object is
-  created; see the limits in `sdk/README.md`.
+- Mesh edits made in Babylon travel only when an object is created; see the
+  limits in `sdk/README.md`.
+- `bench.html?mode=sdk|legacy` measures the sync against the previous
+  whole-scene path; results are in `sdk/README.md`.
 - The console shows a `_multiprocessing` traceback on every run. That's an
   add-on import Blender reports and moves past.

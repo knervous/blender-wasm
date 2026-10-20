@@ -56,9 +56,9 @@ export interface MeshData {
   groups: [number, number, number][];
 }
 
-/** Fields a change can carry. Only the first four have Blender writers built in. */
+/** Fields a change can carry; every one has a Blender writer in protocol.py. */
 export type Field = "name" | "parent" | "transform" | "visible" | "materials";
-export const BLENDER_WRITABLE: readonly Field[] = ["name", "parent", "transform", "visible"];
+export const BLENDER_WRITABLE: readonly Field[] = ["name", "parent", "transform", "visible", "materials"];
 export const SCENE_FIELDS: readonly Field[] = ["name", "parent", "transform", "visible", "materials"];
 
 export interface MaterialAssignment {
@@ -71,16 +71,20 @@ export type Change =
   | { op: "delete"; id: string }
   | { op: "update"; id: string; field: Field; value: unknown; previous: unknown }
   | { op: "geometry"; id: string; mesh: MeshData }
-  | { op: "material"; name: string; value: MaterialState };
+  /** A material's properties, by name. `previous` is the agreed value (toBlender only). */
+  | { op: "material"; name: string; value: MaterialState; previous?: MaterialState };
 
 /** toBlender: the scene's edits on their way out. toScene: Blender's results on their way in. */
 export type Direction = "toBlender" | "toScene";
 
 export type Side = "blender" | "scene";
 
+/** What a conflict is about: an entity field, or (id = material name) a material's properties. */
+export type ConflictSubject = Field | "material";
+
 export interface Conflict {
   id: string;
-  field: Field;
+  field: ConflictSubject;
   blender: unknown;
   scene: unknown;
   kept: Side;

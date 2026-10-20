@@ -66,7 +66,9 @@ function setStatus(text: string, kind = ""): void {
 const tracePlugin: ProjectPlugin = {
   name: "editor-trace",
   hooks: {
-    onConflict: (conflict: Conflict) => log(`[conflict] ${nameOf(conflict.id)}.${conflict.field}: kept ${conflict.kept}`),
+    onConflict: (conflict: Conflict) => log(conflict.field === "material"
+      ? `[conflict] material ${conflict.id}: kept ${conflict.kept}`
+      : `[conflict] ${nameOf(conflict.id)}.${conflict.field}: kept ${conflict.kept}`),
     afterRun: (report) => { if (report.log.length) log(`[blender] ${report.log.join("; ")}`); },
   },
 };
@@ -202,6 +204,72 @@ function refresh(): void {
     ui.pending.append(li);
   }
   $("sync").textContent = pending.length ? `Sync with Blender (${pending.length})` : "Sync with Blender";
+  showMaterial();
+}
+
+/* -------------------------------------------------------------- materials */
+/* Slot 0 of the selected mesh: which material it uses (assignment) and that
+ * material's properties. Both are pending changes until the next sync.
+ * Colours are linear, as in glTF and Principled BSDF; the picker shows sRGB. */
+const matPanel = $("material-panel");
+const matName = $<HTMLSelectElement>("mat-name");
+const matColor = $<HTMLInputElement>("mat-color");
+const matMetallic = $<HTMLInputElement>("mat-metallic");
+const matRoughness = $<HTMLInputElement>("mat-roughness");
+let newMaterialCount = 0;
+
+const selectedEntity = () => {
+  const id = selected ? side.idOf(selected) : null;
+  return id ? side.read()[id] ?? null : null;
+};
+
+function showMaterial(): void {
+  const entity = selectedEntity();
+  matPanel.hidden = !entity || entity.kind !== "mesh";
+  if (!entity || matPanel.hidden) return;
+  const current = entity.materials[0] ?? "";
+  matName.replaceChildren(new Option("(none)", ""), ...side.materialNames().map((n) => new Option(n, n)));
+  matName.value = current;
+  const state = current ? side.materialState(current) : undefined;
+  for (const input of [matColor, matMetallic, matRoughness]) input.disabled = !state;
+  if (!state) return;
+  matColor.value = new Color3(state.color[0], state.color[1], state.color[2]).toGammaSpace().toHexString().toLowerCase();
+  matMetallic.value = String(state.metallic);
+  matRoughness.value = String(state.roughness);
+}
+
+function assignSlot0(name: string | null): void {
+  const entity = selectedEntity();
+  if (!entity || !selected) return;
+  const slots = entity.materials.length ? [...entity.materials] : [null];
+  slots[0] = name;
+  side.assignMaterials(selected, slots);
+  refresh();
+  scheduleAutoSync();
+}
+
+function editMaterial(): void {
+  const name = matName.value;
+  const state = name ? side.materialState(name) : undefined;
+  if (!state) return;
+  const linear = Color3.FromHexString(matColor.value).toLinearSpace();
+  side.setMaterial(name, {
+    color: [linear.r, linear.g, linear.b, state.color[3]],
+    metallic: Number(matMetallic.value),
+    roughness: Number(matRoughness.value),
+  });
+  refresh();
+}
+
+matName.onchange = () => assignSlot0(matName.value || null);
+$("mat-new").onclick = () => {
+  const name = `material_${++newMaterialCount}`;
+  side.setMaterial(name, { color: [0.6, 0.6, 0.6, 1], metallic: 0, roughness: 0.5 });
+  assignSlot0(name);
+};
+for (const input of [matColor, matMetallic, matRoughness]) {
+  input.addEventListener("input", editMaterial);
+  input.addEventListener("change", scheduleAutoSync);
 }
 
 let autoSyncTimer = 0;

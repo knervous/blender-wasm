@@ -1,7 +1,9 @@
 import { diffToBlender, diffToScene } from "./diff.ts";
-import { defaultTranslators, type FieldTranslator } from "./translators.ts";
+import {
+  defaultTranslators, materialPropertiesTranslator, type FieldTranslator, type MaterialTranslator,
+} from "./translators.ts";
 import type {
-  BlenderCommand, BlenderJob, BlenderRunner, Change, Conflict, Direction, EntityState, Field,
+  BlenderCommand, BlenderJob, BlenderRunner, Change, Conflict, ConflictSubject, Direction, EntityState, Field,
   MaterialState, MeshData, RunReport, SceneSide, Side, Snapshot,
 } from "./types.ts";
 
@@ -16,8 +18,12 @@ import type {
 export interface ProjectHooks {
   /** Return a replacement change, `null` to drop it, or nothing to keep it. */
   filterChange?(change: Change, direction: Direction): Change | null | void;
-  /** Who wins when both sides changed a field since the last agreed state (default: Blender). */
-  conflictPolicy?(id: string, field: Field): Side | void;
+  /**
+   * Who wins when both sides changed something since the last agreed state
+   * (default: Blender): an entity field, or with field "material" a material's
+   * properties (id is then the material name).
+   */
+  conflictPolicy?(id: string, field: ConflictSubject): Side | void;
   /** Last look at the job: add commands, a script, handlers. */
   beforeRun?(job: BlenderJob): BlenderJob | void;
   afterRun?(report: RunReport): void;
@@ -28,8 +34,10 @@ export interface ProjectHooks {
 export interface ProjectPlugin {
   name: string;
   hooks?: ProjectHooks;
-  /** Replace how a field compares or reshapes its values. */
+  /** Replace how a field compares or reshapes its values (`materials` is slot assignment). */
   translators?: Partial<Record<Field, FieldTranslator>>;
+  /** Replace how material properties compare or reshape. */
+  materialTranslator?: MaterialTranslator;
   /**
    * Extra Blender-side commands: name -> Python source defining
    * `handle(cmd, by_id, api)`. A command `{ op: name, ... }` reaches it.
@@ -75,6 +83,7 @@ const decoder = new TextDecoder();
 export class Project {
   private readonly plugins: ProjectPlugin[] = [];
   private readonly translators: Record<Field, FieldTranslator> = defaultTranslators();
+  private materialTranslator: MaterialTranslator = materialPropertiesTranslator;
   private agreedState: Snapshot = { entities: {}, materials: {} };
   private blendBytes: Uint8Array | null = null;
   private queue: Promise<unknown> = Promise.resolve();
@@ -86,6 +95,7 @@ export class Project {
   use(plugin: ProjectPlugin): this {
     this.plugins.push(plugin);
     Object.assign(this.translators, plugin.translators);
+    if (plugin.materialTranslator) this.materialTranslator = plugin.materialTranslator;
     return this;
   }
 
@@ -101,7 +111,10 @@ export class Project {
 
   /** The scene's edits a sync would send now (after toBlender filters). */
   pending(): Change[] {
-    const changes = diffToBlender(this.agreedState.entities, this.options.scene.read(), this.translators);
+    const scene = this.options.scene;
+    const changes = diffToBlender(
+      this.agreedState, scene.read(), scene.readMaterials(), this.translators, this.materialTranslator,
+    );
     return this.filter(changes, "toBlender");
   }
 
@@ -168,7 +181,7 @@ export class Project {
     return out;
   }
 
-  private policy(id: string, field: Field): Side {
+  private policy(id: string, field: ConflictSubject): Side {
     for (const plugin of this.plugins) {
       const side = plugin.hooks?.conflictPolicy?.(id, field);
       if (side) return side;
@@ -176,11 +189,36 @@ export class Project {
     return "blender";
   }
 
+  /** Translators' toScene reshaping, applied to Blender's changes before the filters. */
+  private shapeForScene(changes: Change[]): Change[] {
+    return changes.map((change) => {
+      if (change.op === "update") {
+        const toScene = this.translators[change.field].toScene;
+        return toScene ? { ...change, value: toScene(change.value) } : change;
+      }
+      if (change.op === "material" && this.materialTranslator.toScene) {
+        return { ...change, value: this.materialTranslator.toScene(change.value) };
+      }
+      return change;
+    });
+  }
+
   private toCommands(changes: Change[], files: Record<string, Uint8Array>): BlenderCommand[] {
     const scene = this.options.scene;
     const commands: BlenderCommand[] = [];
-    for (const change of changes) {
-      if (change.op === "delete") {
+    // Materials first: an assignment or create in the same run may name one.
+    const ordered = [...changes].sort((a, b) => Number(b.op === "material") - Number(a.op === "material"));
+    for (const change of ordered) {
+      if (change.op === "material") {
+        const translator = this.materialTranslator;
+        commands.push({
+          op: "material",
+          name: change.name,
+          value: translator.toBlender ? translator.toBlender(change.value) : change.value,
+          ...(change.previous ? { expect: change.previous } : {}),
+          policy: this.policy(change.name, "material"),
+        });
+      } else if (change.op === "delete") {
         commands.push({ op: "delete", id: change.id });
       } else if (change.op === "update") {
         const translator = this.translators[change.field];
@@ -253,7 +291,9 @@ export class Project {
     }
 
     const received = this.filter(
-      diffToScene(sceneNow, scene.readMaterials(), report.snapshot, report.geometry, this.translators),
+      this.shapeForScene(diffToScene(
+        sceneNow, scene.readMaterials(), report.snapshot, report.geometry, this.translators, this.materialTranslator,
+      )),
       "toScene",
     );
     scene.apply(received);

@@ -1,22 +1,33 @@
-import type { FieldTranslator } from "./translators.ts";
-import type { Change, EntityState, Field, MaterialState, MeshData } from "./types.ts";
+import type { FieldTranslator, MaterialTranslator } from "./translators.ts";
+import type { Change, EntityState, Field, MaterialState, MeshData, Snapshot } from "./types.ts";
 import { BLENDER_WRITABLE, SCENE_FIELDS } from "./types.ts";
 
 type Translators = Record<Field, FieldTranslator>;
 
 /**
- * The scene's edits since the last agreed state: what is new, gone, or has a
- * Blender-writable field that differs. `previous` is the agreed value, which
+ * The scene's edits since the last agreed state: material properties that
+ * differ (for materials the scene's entities use), then entities that are new,
+ * gone, or have a field that differs. `previous` is the agreed value, which
  * Blender checks before writing (conflict detection).
  */
 export function diffToBlender(
-  agreed: Record<string, EntityState>,
+  agreed: Snapshot,
   scene: Record<string, EntityState>,
+  sceneMaterials: Record<string, MaterialState>,
   translators: Translators,
+  materialTranslator: MaterialTranslator,
 ): Change[] {
   const changes: Change[] = [];
+  const used = new Set(Object.values(scene).flatMap((e) => e.materials).filter((m): m is string => Boolean(m)));
+  for (const name of used) {
+    const value = sceneMaterials[name];
+    const before = agreed.materials[name];
+    if (value && (!before || !materialTranslator.equal(before, value))) {
+      changes.push({ op: "material", name, value, previous: before });
+    }
+  }
   for (const [id, entity] of Object.entries(scene)) {
-    const before = agreed[id];
+    const before = agreed.entities[id];
     if (!before) {
       changes.push({ op: "create", id, entity });
       continue;
@@ -27,7 +38,7 @@ export function diffToBlender(
       }
     }
   }
-  for (const id of Object.keys(agreed)) {
+  for (const id of Object.keys(agreed.entities)) {
     if (!scene[id]) changes.push({ op: "delete", id });
   }
   return changes;
@@ -45,11 +56,12 @@ export function diffToScene(
   report: { entities: Record<string, EntityState>; materials: Record<string, MaterialState> },
   geometry: Record<string, MeshData>,
   translators: Translators,
+  materialTranslator: MaterialTranslator,
 ): Change[] {
   const changes: Change[] = [];
   for (const [name, value] of Object.entries(report.materials)) {
     const before = sceneMaterials[name];
-    if (!before || !sameMaterial(before, value)) changes.push({ op: "material", name, value });
+    if (!before || !materialTranslator.equal(before, value)) changes.push({ op: "material", name, value });
   }
   for (const [id, entity] of Object.entries(report.entities)) {
     const before = scene[id];
@@ -69,8 +81,3 @@ export function diffToScene(
   }
   return changes;
 }
-
-const sameMaterial = (a: MaterialState, b: MaterialState): boolean =>
-  a.color.every((c, i) => Math.abs(c - b.color[i]) < 1e-5)
-  && Math.abs(a.metallic - b.metallic) < 1e-5
-  && Math.abs(a.roughness - b.roughness) < 1e-5;

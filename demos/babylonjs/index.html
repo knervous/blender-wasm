@@ -67,6 +67,17 @@
           <button id="delete">Delete</button>
           <button id="adopt">Adopt Babylon content</button>
         </div>
+        <div id="material-panel" class="material" hidden>
+          <div class="row">
+            <label class="hint inline">Material <select id="mat-name"></select></label>
+            <button id="mat-new">New</button>
+          </div>
+          <div class="row">
+            <label class="hint inline">Colour <input id="mat-color" type="color" /></label>
+            <label class="hint inline">Metallic <input id="mat-metallic" type="range" min="0" max="1" step="0.05" /></label>
+            <label class="hint inline">Roughness <input id="mat-roughness" type="range" min="0" max="1" step="0.05" /></label>
+          </div>
+        </div>
         <label class="hint"><input id="blender-lights" type="checkbox" /> Light with Blender's lights (physical units: a 1000 W lamp is very bright)</label>
         <ul id="outliner"></ul>
       </section>

@@ -63,7 +63,7 @@ def read_entity(obj):
         "parent": entity_id(obj.parent) if obj.parent else None,
         "transform": read_transform(obj),
         "visible": read_visible(obj),
-        "materials": [slot.material.name if slot.material else None for slot in obj.material_slots],
+        "materials": read_slots(obj),
     }
 
 
@@ -106,8 +106,31 @@ def same(a, b):
     return a == b
 
 
+def read_slots(obj):
+    return [slot.material.name if slot.material else None for slot in obj.material_slots]
+
+
+def write_slots(obj, names):
+    """Material per slot, by name: materials the run created or Blender had."""
+    data = obj.data
+    if data is None or not hasattr(data, "materials"):
+        return
+    wanted = [bpy.data.materials.get(name) if name else None for name in names]
+    missing = [name for name, mat in zip(names, wanted) if name and mat is None]
+    if missing:
+        raise ValueError(f"no material named {missing!r} (send it as a material command first)")
+    while len(data.materials) > len(wanted):
+        data.materials.pop()
+    for index, mat in enumerate(wanted):
+        if index < len(data.materials):
+            data.materials[index] = mat
+        else:
+            data.materials.append(mat)
+
+
 FIELD_READ = {
     "name": lambda obj: obj.name,
+    "materials": read_slots,
     "transform": read_transform,
     "visible": read_visible,
     "parent": lambda obj: entity_id(obj.parent) if obj.parent else None,
@@ -158,14 +181,14 @@ def mesh_payload(obj, depsgraph):
             groups.append([int(value), start * 3, int(tris) * 3])
             start += int(tris)
         data = b"".join(parts)
-        slots = [slot.material.name if slot.material else "" for slot in obj.material_slots]
         # Fingerprint quantised values: modifier evaluation (bevel, ...) is not
         # bit-for-bit repeatable across runs, and a raw-bytes hash would resend
         # an unchanged mesh every time.
         quantised = [np.round(pos * 1e4).astype(np.int32), np.round(nor * 1e4).astype(np.int32)]
         if has_uv:
             quantised.append(np.round(uv * 1e5).astype(np.int32))
-        digest = hashlib.sha1(b"".join(q.tobytes() for q in quantised) + json.dumps([groups, slots]).encode()).hexdigest()
+        # Slot names stay out: assignment travels as the `materials` field.
+        digest = hashlib.sha1(b"".join(q.tobytes() for q in quantised) + json.dumps(groups).encode()).hexdigest()
         return {"vertexCount": int(count * 3), "hasUv": has_uv, "groups": groups, "hash": digest}, data
     finally:
         evaluated.to_mesh_clear()
@@ -211,6 +234,8 @@ def ensure_material(name, props):
         bsdf.inputs["Roughness"].default_value = props["roughness"]
     if props:
         mat.diffuse_color = props["color"]
+        mat.metallic = props["metallic"]
+        mat.roughness = props["roughness"]
     return mat
 
 
@@ -266,12 +291,27 @@ def cmd_update(cmd, by_id):
         write_visible(obj, cmd["value"])
     elif field == "parent":
         write_parent(obj, cmd["value"], by_id)
+    elif field == "materials":
+        write_slots(obj, cmd["value"])
     else:
         raise ValueError(f"no Blender writer for field {field!r}")
     LOG.append(f"{field} {obj.name}")
 
 
-HANDLERS = {"create": cmd_create, "delete": cmd_delete, "update": cmd_update}
+def cmd_material(cmd, by_id):
+    existing = bpy.data.materials.get(cmd["name"])
+    if existing is not None and "expect" in cmd:
+        current = read_material(existing)
+        if not same(current, cmd["expect"]):
+            CONFLICTS.append({"id": cmd["name"], "field": "material", "blender": current,
+                              "scene": cmd["value"], "kept": cmd.get("policy", "blender")})
+            if cmd.get("policy", "blender") == "blender":
+                return
+    ensure_material(cmd["name"], cmd["value"])
+    LOG.append(f"material {cmd['name']}")
+
+
+HANDLERS = {"create": cmd_create, "delete": cmd_delete, "update": cmd_update, "material": cmd_material}
 
 # Plugin handlers: each source defines handle(cmd, by_id, api).
 API = {"read_entity": read_entity, "write_transform": write_transform, "log": LOG.append,
