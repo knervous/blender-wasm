@@ -77,6 +77,51 @@ stage_numpy() {
   ( cd "$pystage/site-packages" && unzip -o -q "$whl" -x '*.dist-info/RECORD' )
 }
 
+# trim_headless_assets <stage-dir> <python-subdir>
+# What a headless Blender never reads, out of the data package. Boot copies the
+# whole package into the in-memory FS, so every MB is boot time (and it is the
+# phase that suffers most under memory pressure). UI-only datafiles go, numpy's
+# test suites go, and the fonts shrink to Blender's two defaults (the Noto
+# fallbacks for other scripts and emoji are 13 MB; BLENDER_WASM_ALL_FONTS=1
+# keeps them, e.g. for text objects in CJK).
+trim_headless_assets() {
+  local stage="$1" pydir="$2" data="$1/$BLENDER_VERSION_DIR/datafiles"
+  rm -rf "$data/icons" "$data/icons_svg" "$data/icons_blend" "$data/studiolights" "$data/cursors"
+  rm -f "$data"/splash*.png "$data"/preview*.blend
+  if [ "${BLENDER_WASM_ALL_FONTS:-0}" != 1 ]; then
+    find "$data/fonts" -type f ! -name 'Inter.woff2' ! -name 'DejaVuSansMono.woff2' -delete
+  fi
+  find "$stage/$pydir/site-packages/numpy" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
+  rm -rf "$stage/$pydir/pydoc_data"
+  log "trimmed headless assets -> $(du -sh "$stage" | cut -f1)"
+}
+
+# host_python313
+# A host interpreter of the target's version (3.13), so its bytecode matches:
+# python3 when it is 3.13, else the native build-python build_python.sh made.
+host_python313() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3.13 "$DEPS/build/python-native/python.exe" "$DEPS/build/python-native/python"; do
+    [ -n "$candidate" ] || continue
+    if "$candidate" -c "import sys; sys.exit(sys.version_info[:2] != (3, 13))" 2>/dev/null; then
+      printf '%s' "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+# precompile_python <dir>...
+# Every boot otherwise compiles Blender's scripts and the stdlib from source
+# (wasm has no __pycache__ on a fresh preloaded FS). unchecked-hash .pyc are
+# used regardless of the source's mtime, which the preloaded FS does not keep.
+precompile_python() {
+  local py
+  py=$(host_python313) || { log "WARNING: no Python 3.13 host interpreter; shipping without .pyc"; return 0; }
+  log "precompiling Python ($(basename "$py"))"
+  "$py" -m compileall -q -j 0 --invalidation-mode unchecked-hash "$@" >/dev/null || \
+    log "WARNING: some files did not compile (left as source)"
+}
+
 # undef_stub_object
 # Compiles scripts/undef_symbols.txt into no-op definitions and prints the
 # object path. See scripts/gen_undef_stubs.py for why they must exist.

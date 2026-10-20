@@ -1,5 +1,0 @@
-node_modules/
-dist/
-# installed by `npm run blender`
-public/blender-runtime/
-public/blender-ui

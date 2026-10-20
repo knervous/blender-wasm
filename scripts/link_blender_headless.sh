@@ -83,6 +83,8 @@ stage_assets "$STAGE" python3.13
 stage_cycles_addon "$STAGE"
 python3 "$ROOT/scripts/patch_gltf_ctypes.py" "$STAGE"
 stage_numpy "$STAGE/python3.13"
+trim_headless_assets "$STAGE" python3.13
+precompile_python "$STAGE/$BLENDER_VERSION_DIR/scripts" "$STAGE/python3.13"
 log "scripts=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/scripts"|cut -f1) datafiles=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/datafiles"|cut -f1) py=$(du -sh "$STAGE/python3.13"|cut -f1)"
 
 

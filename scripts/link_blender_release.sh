@@ -22,6 +22,7 @@ mkdir -p "$OUT"
 # Python under lib/python3.13 so PYTHONHOME=/opfs/assets resolves the stdlib.
 stage_assets "$STAGE" lib/python3.13
 python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/$BLENDER_VERSION_DIR/datafiles/colormanagement"
+precompile_python "$STAGE/$BLENDER_VERSION_DIR/scripts" "$STAGE/lib/python3.13"
 
 # --- essentials brush assets -> 5.3/datafiles/assets/brushes -----------------
 # Blender 4.3+ ships sculpt/paint brushes as ID *assets* in the bundled

@@ -38,44 +38,44 @@ version (6.0.1), and any `EMSDK` already in your shell is ignored.
 ## Outputs
 
 ```
-dist/blender-wasm-node/       blender.js, blender.wasm.zst, blender.data.zst,
-                              index.mjs, run-once.cjs, manifest.json, LICENSE
-dist/blender-wasm-browser/    blender.js, blender.{wasm,data}.{zst,br}, manifest.json, LICENSE
+dist/blender-wasm-browser/    @knervous/blender-wasm-runtime: blender.js, blender.{wasm,data}.br,
+                              manifest.json, LICENSE, README.md (+ an npm pack .tgz in dist/)
+dist/blender-wasm-node/       the Node runtime: blender.js, blender.{wasm,data}.zst, manifest.json, LICENSE
 dist/blender-web-<rev>.tar.gz the demo site (serve dist/ cross-origin isolated)
 ```
 
-`manifest.json` records the sha256 and size of every file, plus the fork
-revision, Blender commit, emsdk version and wasm-opt level the package was
-built from.
+`manifest.json` records the size and sha256 of every file, compressed and raw,
+plus the fork revision, Blender commit, emsdk version and wasm-opt level the
+runtime was built from.
 
-## Using the Node runtime
+## npm packages
+
+Two packages, the way ffmpeg.wasm splits `@ffmpeg/ffmpeg` from its core:
+
+- [`@knervous/blender-wasm`](packages/blender-wasm): the API (about 80 kB). It
+  has the project model, the browser session, engine adapters for Babylon.js
+  (`/babylon`) and three.js (`/three`), a Vite plugin (`/vite`), a
+  `blender-wasm install <dir>` CLI and a Node session (`/node`).
+- `@knervous/blender-wasm-runtime`: the binaries (`./build.sh browser`, 33 MB
+  packed). It is a peer dependency of the API, so npm installs it alongside,
+  and API releases don't republish it.
 
 ```js
-import { runPython } from "./dist/blender-wasm-node/index.mjs";
+// vite.config.js
+import { blenderWasm } from "@knervous/blender-wasm/vite";
+export default { plugins: [blenderWasm()] }; // COOP/COEP, runtime served and emitted
 
-const { files } = await runPython(`
-import bpy
-bpy.ops.mesh.primitive_monkey_add()
-bpy.ops.export_scene.gltf(filepath="/out/monkey.glb")
-`, { collect: "/out" });
-// files["/out/monkey.glb"] -> Uint8Array
+// app
+import { Project } from "@knervous/blender-wasm";
+import { createBlenderSession } from "@knervous/blender-wasm/browser";
+import { ThreeSide } from "@knervous/blender-wasm/three"; // or BabylonSide from /babylon
+
+const project = new Project({ session: createBlenderSession(), scene: new ThreeSide(scene) });
+await project.newScene();
 ```
 
-- `runPython(code, { files, collect, blendFile, timeoutMs, initialMemoryMb })`
-  runs `code` under `--background --factory-startup`. If the script raises, the
-  promise rejects with the Python traceback.
-- `runBlender({ args, files, collect, completionMarker })` runs Blender with raw
-  CLI arguments.
-- `files` stages bytes into the module's in-memory filesystem before Blender
-  starts. Everything under `collect` comes back afterwards.
-- **Each call is its own process.** The module's `main()` never returns, so an
-  instance cannot be reused, and instantiating it repeatedly in one process
-  exhausts V8. Scene state therefore does not carry over between calls: save a
-  `.blend` into `collect` and pass it back as `blendFile` on the next call.
-- Calls finish when a sentinel line is printed (see `api/run-once.cjs`), not
-  through a promise or an exit code.
-- The `.zst` files are decompressed next to themselves on first use, via
-  `node:zlib`.
+The package README covers setup, serving and the Node session. `DESIGN.md`
+covers the sync model, the session and the measurements.
 
 ## Embedding the web build
 
@@ -94,17 +94,11 @@ The protocol is `postMessage` with `blender-embed-*` messages, documented in
 
 ## Demos
 
-[`demos/babylonjs`](demos/babylonjs) is a Babylon.js editor wired to headless
-Blender in both directions. Edits in Babylon push back onto the `.blend`, and
-`bpy` scripts and Blender imports show up in Babylon. Blender runs in the tab:
-it uses the pthread browser runtime and assumes cross-origin isolation.
-
-## Project sync SDK
-
-[`sdk/project`](sdk/README.md) keeps Blender and an engine scene as one
-working project. Objects have stable ids, and the two sides exchange typed
-per-field changes; mesh data crosses only where geometry changed. Translators
-and hooks are pluggable per field and per stage. The Babylon demo is built on it.
+[`demos/editor`](demos/editor) is a Babylon.js or three.js editor
+(`?engine=three`) wired to headless Blender in both directions. Edits in the
+engine push back onto the `.blend`, and `bpy` scripts and Blender imports show
+up in the engine. Blender runs in the tab: it uses the pthread browser runtime
+and assumes cross-origin isolation.
 
 ## Optimising and compressing
 

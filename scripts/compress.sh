@@ -3,11 +3,11 @@
 #
 #   bash scripts/compress.sh <file> [more...]
 #
-# Writes <file>.zst always, and <file>.br when COMPRESS_BROTLI=1 (default) and
-# `brotli` is installed. Originals are left in place.
+# Writes <file>.zst when COMPRESS_ZSTD=1 (default), and <file>.br when
+# COMPRESS_BROTLI=1 (default) and `brotli` is installed. Originals are left in
+# place.
 #
-#   .zst  what the bundled loaders read: Node via node:zlib (22.15+), the
-#         browser demo via zstddec. Level ZSTD_LEVEL (default 21, --ultra).
+#   .zst  what the Node runtime reads, via node:zlib (22.15+). Level ZSTD_LEVEL (default 21, --ultra).
 #         Levels above 21 raise the window past 64 MB, which zstddec and some
 #         decoders refuse; keep 21 unless every consumer is known to cope.
 #   .br   for serving over HTTP with `Content-Encoding: br`, which every
@@ -17,7 +17,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 [ $# -ge 1 ] || die "usage: compress.sh <file> [more...]"
-command -v zstd >/dev/null || die "zstd not installed"
+COMPRESS_ZSTD="${COMPRESS_ZSTD:-1}"
+[ "$COMPRESS_ZSTD" = 0 ] || command -v zstd >/dev/null || die "zstd not installed"
 
 ZSTD_LEVEL="${ZSTD_LEVEL:-21}"
 BROTLI_QUALITY="${BROTLI_QUALITY:-11}"
@@ -33,11 +34,14 @@ size() { wc -c < "$1" | tr -d ' '; }
 for file in "$@"; do
   [ -f "$file" ] || die "no such file: $file"
   raw=$(size "$file")
-  zstd -q -f --ultra -"$ZSTD_LEVEL" -T0 "$file" -o "$file.zst"
-  line="$(basename "$file"): $(mb "$raw") -> zst $(mb "$(size "$file.zst")")"
+  line="$(basename "$file"): $(mb "$raw") ->"
+  if [ "$COMPRESS_ZSTD" = 1 ]; then
+    zstd -q -f --ultra -"$ZSTD_LEVEL" -T0 "$file" -o "$file.zst"
+    line="$line zst $(mb "$(size "$file.zst")")"
+  fi
   if [ "$COMPRESS_BROTLI" = 1 ]; then
     brotli -f -q "$BROTLI_QUALITY" -w 24 -o "$file.br" "$file"
-    line="$line, br $(mb "$(size "$file.br")")"
+    line="$line br $(mb "$(size "$file.br")")"
   fi
   log "$line"
 done

@@ -1,0 +1,29 @@
+{
+  "name": "blender-wasm-editor-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A Babylon.js or three.js editor with Blender running in the browser as WebAssembly",
+  "license": "GPL-2.0-or-later",
+  "scripts": {
+    "sdk": "npm --prefix ../../packages/blender-wasm run build",
+    "predev": "npm run sdk",
+    "prebuild": "npm run sdk",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json",
+    "blender:ui": "node scripts/prepare-blender-ui.mjs"
+  },
+  "devDependencies": {
+    "@babylonjs/core": "^9.31.0",
+    "@babylonjs/loaders": "^9.31.0",
+    "@babylonjs/serializers": "^9.31.0",
+    "@knervous/blender-wasm": "file:../../packages/blender-wasm",
+    "@knervous/blender-wasm-runtime": "file:../../dist/blender-wasm-browser",
+    "@types/three": "^0.186.0",
+    "three": "^0.186.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4"
+  }
+}

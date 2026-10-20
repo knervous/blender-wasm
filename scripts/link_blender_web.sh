@@ -26,6 +26,7 @@ stage_assets "$STAGE" python3.13
 # False Color view transform samples it. config.ocio is patched in staging
 # only (source tree untouched).
 python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/$BLENDER_VERSION_DIR/datafiles/colormanagement"
+precompile_python "$STAGE/$BLENDER_VERSION_DIR/scripts" "$STAGE/python3.13"
 log "scripts=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/scripts"|cut -f1) datafiles=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/datafiles"|cut -f1) py=$(du -sh "$STAGE/python3.13"|cut -f1)"
 
 cmd=$(cmake_link_cmd "$WEB/blender.js")

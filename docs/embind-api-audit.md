@@ -31,13 +31,13 @@ mode: an in-place vertex edit was detected and only that mesh was resent.
   rna_main 2/12/0, rna_context 1/20/1. Sum roughly 200 structs, 2,000 properties, 100 functions.
   Excluded bulk: rna_userdef 65/759, rna_space 55/623, rna_nodetree 65/421, rna_wm 23/134, rna_ui 9/78, brush, etc.
   Modifier structs dominate the count but are uniform in shape (type tag + props).
-- Note the scene-sync protocol (`sdk/project/protocol.py`, 483 lines) uses only: object name/parent/
+- Note the scene-sync protocol (`packages/blender-wasm/src/project/protocol.py`, 483 lines) uses only: object name/parent/
   matrix/visibility/custom prop (`bw_id`), material slots and a few material props, mesh creation and
   evaluated mesh readout. That is a much smaller set than the subset above.
 
 ## 2. Zero-copy evaluated mesh access
 
-Current Python path (`sdk/project/protocol.py::mesh_payload`): `evaluated_get`, `to_mesh()`,
+Current Python path (`packages/blender-wasm/src/project/protocol.py::mesh_payload`): `evaluated_get`, `to_mesh()`,
 `calc_loop_triangles`, then six `foreach_get` copies into numpy, a stable argsort by material, an
 un-indexed re-expansion of positions/normals/uvs, Y-up conversion, sha1 fingerprint, written to the FS as a `.bin`.
 
@@ -77,7 +77,7 @@ C++ APIs that expose the same data in place (all in `blender/source/blender/`):
   -sMAIN_MODULE=1 -sMODULARIZE=1 -sERROR_ON_UNDEFINED_SYMBOLS=0 -sPTHREAD_POOL_SIZE=4
   -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPF32 -sFORCE_FILESYSTEM=1
   -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB`. `main()` runs on a worker pthread; the JS (main) thread is free.
-  `main()` never returns in headless; Python `serve()` is the loop (`sdk/project/protocol.py:457`), polling
+  `main()` never returns in headless; Python `serve()` is the loop (`packages/blender-wasm/src/project/protocol.py:457`), polling
   `/ipc/request.json` with `time.sleep(0.001)`. That 1 ms poll plus JSON and FS file round trips is the fixed
   cost described in the brief; measured at 3–8 ms for an empty request (see the note at the top).
 - **Thread rule.** Blender's "main" thread is the proxied pthread (`BLI_thread_is_main()` =
