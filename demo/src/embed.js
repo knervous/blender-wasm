@@ -3,10 +3,11 @@
  * the edited file back. @knervous/blender-web's createBlenderUi() is the typed
  * host side.
  *
- *   <iframe src="/blender/?embed=1&session=/api/scene.blend&id=chair-01">
+ *   <iframe src="/blender/?session=/api/scene.blend&id=chair-01">
  *
  * Query parameters
- *   embed=1         hide the public launcher chrome and talk to window.parent
+ *   embed=0         show the public launcher page (Launch button, credits)
+ *                   instead of going straight into Blender, the default
  *   session=<url>   a .blend fetched before boot and opened as the scene
  *   id=<string>     opaque label echoed back on every message
  *   parent=<origin> the embedding page's origin, when it is another origin (a
@@ -40,7 +41,8 @@ const parentOrigin = (() => {
 })();
 
 export const embed = {
-  enabled: params.get("embed") === "1",
+  // Straight into Blender (no launcher page) unless ?embed=0 asks for it.
+  enabled: params.get("embed") !== "0",
   parentOrigin,
   sessionUrl: params.get("session"),
   id: params.get("id"),
