@@ -20,6 +20,6 @@ export default defineConfig({
   },
   preview: { headers: isolationHeaders },
   // The large precompiled runtime is installed into dist separately. Preserve
-  // it while rebuilding this small Libra-aware launcher shell.
+  // it while rebuilding this small launcher shell.
   build: { target: "esnext", emptyOutDir: false },
 });

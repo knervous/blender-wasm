@@ -5,15 +5,16 @@
 # tells meson it cannot run target binaries during configure, so numpy's compile
 # checks fall back to cross-safe defaults instead of trying to execute wasm.
 #
-# Paths are absolute because meson does not expand environment variables here;
-# build_numpy.sh regenerates this file if the repo moves.
+# This is a template. Meson does not expand environment variables, so
+# build_numpy.sh renders it to numpy-build/emscripten-cross.ini with @EM_BIN@
+# replaced by the in-repo emsdk path of the current checkout.
 
 [binaries]
-c = '/Users/Paul/source/eqrequiem/blender-wasm/emsdk/upstream/emscripten/emcc'
-cpp = '/Users/Paul/source/eqrequiem/blender-wasm/emsdk/upstream/emscripten/em++'
-ar = '/Users/Paul/source/eqrequiem/blender-wasm/emsdk/upstream/emscripten/emar'
-ranlib = '/Users/Paul/source/eqrequiem/blender-wasm/emsdk/upstream/emscripten/emranlib'
-strip = '/Users/Paul/source/eqrequiem/blender-wasm/emsdk/upstream/emscripten/emstrip'
+c = '@EM_BIN@/emcc'
+cpp = '@EM_BIN@/em++'
+ar = '@EM_BIN@/emar'
+ranlib = '@EM_BIN@/emranlib'
+strip = '@EM_BIN@/emstrip'
 pkg-config = 'pkg-config'
 
 [host_machine]

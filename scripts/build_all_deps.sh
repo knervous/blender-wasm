@@ -3,8 +3,9 @@
 # order with parallelism inside each wave. Idempotent: each build_*.sh skips
 # re-downloading and reconfigures from scratch. Invoked by `make deps`.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-SC="${SC:-/tmp/blender-wasm-deplogs}"; mkdir -p "$SC"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+cd "$ROOT"
+SC="${SC:-$DEPS/logs}"; mkdir -p "$SC"
 
 wave() {  # wave <name> <script...>
   local name="$1"; shift
@@ -56,4 +57,4 @@ wave spirv   spirv_tools
 wave shaderc shaderc
 
 echo "==== all deps built into wasm-sysroot ===="
-ls -1 wasm-sysroot/lib/*.a
+ls -1 "$SYSROOT"/lib/*.a

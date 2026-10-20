@@ -12,20 +12,9 @@
  * visit and fed to emscripten via Module.instantiateWasm.
  */
 import { ZSTDDecoder } from "zstddec";
-
-/* Libra embeds the runtime as an isolated, same-origin editing surface. Keep
- * the Emscripten globals inside this child document, but skip the public demo
- * launcher and relay bootstrap state to the parent application. */
-const blenderParams = new URLSearchParams(window.location.search);
-const libraSessionUrl = blenderParams.get("libraSession");
-const libraObjectId = blenderParams.get("libraObjectId");
-const libraEmbedded = blenderParams.get("libraEmbed") === "1";
-document.documentElement.dataset.libraEmbed = String(libraEmbedded);
-
-const postToLibra = (message) => {
-  if (!libraEmbedded || window.parent === window) return;
-  window.parent.postMessage(message, window.location.origin);
-};
+/* A host page can embed this runtime as an isolated, same-origin editing
+ * surface; see embed.js for the protocol. */
+import { embed, onSaveRequest, postToParent } from "./embed.js";
 
 /* ---- Splash UI: progress bar + startup console (ported from gecko-wasm's
  * demo/chrome/src/main.ts). ---- */
@@ -98,9 +87,7 @@ function setProgress(p) {
   fillEl.style.width = `${r}%`;
   progressbar.setAttribute("aria-valuenow", String(r));
   percentEl.textContent = `${r}%`;
-  postToLibra({
-    type: "libra-headed-progress",
-    objectId: libraObjectId,
+  postToParent("progress", {
     phase: p.phase,
     percent: r,
     message: statusEl.textContent,
@@ -384,8 +371,7 @@ const idbOpen = () => new Promise((res, rej) => {
 
 /* ---- boot ---- */
 window.__BGUI__ = { booted: false, device: false, window: false };
-const LIBRA_SESSION_PATH = "/tmp/libra-selected.blend";
-let resolveLibraSave = null;
+let resolveEmbedSave = null;
 const scan = (t) => {
   if (t.includes("WEBGPU_CONTEXT") && t.includes("real device acquired")) window.__BGUI__.device = true;
   /* First frame that actually drew something (not the black startup clear):
@@ -394,13 +380,11 @@ const scan = (t) => {
     window.__BGUI__.window = true;
     splashEl.classList.add("done");
     canvas.classList.add("ready");
-    if (window.parent !== window) {
-      window.parent.postMessage({ type: "libra-headed-ready", objectId: libraObjectId }, window.location.origin);
-    }
+    postToParent("ready");
   }
-  if (resolveLibraSave && /Saved.*\.blend/i.test(t)) {
-    const resolve = resolveLibraSave;
-    resolveLibraSave = null;
+  if (resolveEmbedSave && /Saved.*\.blend/i.test(t)) {
+    const resolve = resolveEmbedSave;
+    resolveEmbedSave = null;
     resolve();
   }
 };
@@ -471,30 +455,30 @@ window.addEventListener(
   { capture: true },
 );
 
-/* Libra bridge: save the live editor state to its prepared in-memory .blend,
- * then transfer a snapshot to the parent. The parent owns authentication and
- * sends it through sdk.blender for GLB export, validation and versioning. */
-async function snapshotForLibra() {
-  if (!libraSessionUrl || !window.Module?.FS) throw new Error("No Libra session is open");
+/* Embed bridge: save the live editor state to the staged session .blend, then
+ * transfer a snapshot to the parent, which decides what to do with it
+ * (validate, export, version). */
+async function snapshotForParent() {
+  if (!embed.sessionUrl || !window.Module?.FS) throw new Error("No embedded session is open");
   canvas.focus();
-  const previousModified = window.Module.FS.stat(LIBRA_SESSION_PATH).mtime.getTime();
+  const previousModified = window.Module.FS.stat(embed.sessionPath).mtime.getTime();
   const saved = new Promise((resolve, reject) => {
     let poll;
     const finish = () => {
       clearTimeout(timer);
       clearInterval(poll);
-      resolveLibraSave = null;
+      resolveEmbedSave = null;
       resolve();
     };
     const timer = setTimeout(() => {
       clearInterval(poll);
-      if (resolveLibraSave) resolveLibraSave = null;
+      if (resolveEmbedSave) resolveEmbedSave = null;
       reject(new Error("Blender did not finish saving within 30 seconds"));
     }, 30000);
-    resolveLibraSave = finish;
+    resolveEmbedSave = finish;
     poll = setInterval(() => {
       try {
-        if (window.Module.FS.stat(LIBRA_SESSION_PATH).mtime.getTime() > previousModified) finish();
+        if (window.Module.FS.stat(embed.sessionPath).mtime.getTime() > previousModified) finish();
       } catch (e) { /* Blender may briefly replace the file while saving. */ }
     }, 100);
   });
@@ -505,25 +489,12 @@ async function snapshotForLibra() {
   window.dispatchEvent(new KeyboardEvent("keydown", eventInit));
   window.dispatchEvent(new KeyboardEvent("keyup", eventInit));
   await saved;
-  const bytes = window.Module.FS.readFile(LIBRA_SESSION_PATH);
+  const bytes = window.Module.FS.readFile(embed.sessionPath);
   const snapshot = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  window.parent.postMessage(
-    { type: "libra-headed-snapshot", objectId: libraObjectId, session: snapshot },
-    window.location.origin,
-    [snapshot],
-  );
+  postToParent("snapshot", { session: snapshot }, [snapshot]);
 }
 
-window.addEventListener("message", (event) => {
-  if (event.origin !== window.location.origin || event.source !== window.parent) return;
-  if (event.data?.type !== "libra-headed-save") return;
-  void snapshotForLibra().catch((reason) => {
-    window.parent.postMessage({
-      type: "libra-headed-error",
-      message: reason instanceof Error ? reason.message : String(reason),
-    }, window.location.origin);
-  });
-});
+onSaveRequest(snapshotForParent);
 
 /* ---- File ▸ Open hijack: a REAL, lazy mount (no copying) of a folder the
  * user picks on their machine. Blender's wm_open_mainfile invoke (wasm build)
@@ -850,20 +821,20 @@ async function start() {
   startBtn.disabled = true;
   startBtn.textContent = "Starting…";
 
-  let libraSessionBytes = null;
-  if (libraSessionUrl) {
-    status(`Loading ${libraObjectId || "selected Libra object"}…`);
-    const response = await fetch(libraSessionUrl);
-    if (!response.ok) throw new Error(`Libra Blender session: HTTP ${response.status}`);
-    libraSessionBytes = new Uint8Array(await response.arrayBuffer());
-    log(`Libra session staged: ${libraObjectId || "object"} · ${formatBytes(libraSessionBytes.byteLength)}`);
+  let sessionBytes = null;
+  if (embed.sessionUrl) {
+    status(`Loading ${embed.id || "session"}…`);
+    const response = await fetch(embed.sessionUrl);
+    if (!response.ok) throw new Error(`Embedded session: HTTP ${response.status}`);
+    sessionBytes = new Uint8Array(await response.arrayBuffer());
+    log(`Session staged: ${embed.id || "scene"} · ${formatBytes(sessionBytes.byteLength)}`);
   }
 
 window.Module = {
   // Respect the browser-persisted Blender preferences. Forcing
   // --factory-startup reopens Quick Setup on every boot; accepting that dialog
-  // replaces the scene and discards the selected Libra import.
-  arguments: [...(libraSessionBytes ? [LIBRA_SESSION_PATH] : []), ...(window.__BARGS || [])],
+  // replaces the scene and discards the staged session.
+  arguments: [...(sessionBytes ? [embed.sessionPath] : []), ...(window.__BARGS || [])],
   canvas,
   print: (t) => { log(t); scan(t); },
   printErr: (t) => { log("[err] " + t); scan(t); },
@@ -915,10 +886,10 @@ window.Module = {
     /* WasmFS native operations are not callable from preRun in this build.
      * onRuntimeInitialized still precedes callMain(), so the positional
      * .blend argument sees this file when Blender begins processing argv. */
-    if (libraSessionBytes) {
+    if (sessionBytes) {
       try { window.Module.FS.mkdir("/tmp"); } catch (e) { /* exists */ }
-      window.Module.FS.writeFile(LIBRA_SESSION_PATH, libraSessionBytes);
-      log(`Libra session mounted at ${LIBRA_SESSION_PATH}`);
+      window.Module.FS.writeFile(embed.sessionPath, sessionBytes);
+      log(`Session mounted at ${embed.sessionPath}`);
     }
     /* Parent of the local-folder mount points (wm_open_mainfile also creates
      * it wasm-side; this covers sessions where the dialog never opened). */
@@ -945,7 +916,7 @@ const reportStartFailure = (reason) => {
   const message = reason instanceof Error ? reason.message : String(reason);
   console.error(message);
   status(`Failed to start: ${message}`);
-  postToLibra({ type: "libra-headed-error", objectId: libraObjectId, message });
+  postToParent("error", { message });
 };
 
 startBtn.onclick = () => { void start().catch(reportStartFailure); };
@@ -953,14 +924,14 @@ startBtn.onclick = () => { void start().catch(reportStartFailure); };
  * GPU status + software-ack), not toggled unconditionally here. */
 refreshStartGate();
 
-if (libraEmbedded) {
-  /* Object Studio is the launcher UI. Once the runtime and adapter are ready,
+if (embed.enabled) {
+  /* The host page is the launcher UI. Once the runtime and adapter are ready,
    * enter Blender directly; a software adapter is allowed with a warning so
    * an embedded session never stalls behind an invisible acknowledgement. */
   const embeddedGpu = await gpuProbePromise;
   if (embeddedGpu.software) {
     gpuAck.checked = true;
-    console.warn("Libra embed is continuing with a software WebGPU adapter.");
+    console.warn("Embedded session is continuing with a software WebGPU adapter.");
   }
   if (embeddedGpu.fatal) {
     reportStartFailure(new Error(embeddedGpu.message.replace(/<[^>]+>/g, "")));

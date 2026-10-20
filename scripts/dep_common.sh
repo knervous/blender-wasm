@@ -4,21 +4,11 @@
 # SAME ABI flags (pthreads + wasm-simd/SSE + exceptions) so they link together.
 set -euo pipefail
 
-ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-# Pin to the in-repo emsdk; a stale exported EMSDK in the shell env must not
-# redirect us to a path that no longer exists (see emsdk-build-setup memory).
-EMSDK="$ROOT/emsdk"
-EM_BIN="$EMSDK/upstream/emscripten"
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
-export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/opt/homebrew/sbin:$EM_BIN:$PATH"
-export PYTHON="${PYTHON:-/opt/homebrew/bin/python3}"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-SYSROOT="${SYSROOT:-$ROOT/wasm-sysroot}"
-DEPS="${DEPS:-$ROOT/deps}"
 DL="$DEPS/downloads"
 SRC="$DEPS/src"
 BLD="$DEPS/build"
-NPROC="${NPROC:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 
 # ABI-critical flags (-pthread, -fexceptions) MUST match across all objects and
 # the final Blender link. SIMD flags only affect codegen, not ABI, so they need
@@ -31,14 +21,17 @@ NPROC="${NPROC:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || ec
 # GLSL->WGSL ICE-recovery longjmp fires (some EEVEE shaders Tint can't translate).
 # The GPU readback is deferred (copy-to-buffer + map after render), so it does not
 # need JSPI/wasm-EH. Keep this identical across every object (deps + Blender).
-WASM_CFLAGS="${WASM_CFLAGS:--O2 -pthread -msimd128 -fexceptions}"
+# -fPIC: the headless build links -sMAIN_MODULE (so CPython can dlopen numpy's
+# side modules), which requires every input to be position-independent. PIC
+# objects link into the static browser builds just as well, so one sysroot
+# serves every flavour.
+WASM_CFLAGS="${WASM_CFLAGS:--O2 -pthread -msimd128 -fexceptions -fPIC}"
 WASM_CXXFLAGS="${WASM_CXXFLAGS:-$WASM_CFLAGS}"
 
 mkdir -p "$DL" "$SRC" "$BLD" "$SYSROOT"
 
-# Write to stderr: fetch_extract returns its path on stdout via `echo`, so log
-# output must not pollute that captured value.
-log() { echo ">> [$(basename "${0%.sh}")] $*" >&2; }
+# log() comes from env.sh and writes to stderr: fetch_extract returns its path
+# on stdout via `echo`, so log output must not pollute that captured value.
 
 # fetch_extract <url> <tarball-name> <expected-extracted-dirname>
 fetch_extract() {

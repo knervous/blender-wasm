@@ -1,7 +1,7 @@
-# Headless Blender → WASM, for driving `bpy` from Node (libra's sdk.blender).
+# Headless Blender → WASM, for driving `bpy` from Node or a browser worker.
 #
 # Same trimmed dependency set as blender-wasm-cache.cmake, but with the entire
-# window/draw stack switched off. libra only calls bpy: import_scene.gltf,
+# window/draw stack switched off. Callers only drive bpy: import_scene.gltf,
 # object/mesh/modifier operations, export_scene.gltf. It never renders a pixel,
 # so GHOST and the WebGPU backend — the parts of the upstream port that are still
 # in progress — are dead weight here and are the main source of build risk.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Release/demo link: like link_blender_web.sh but with NO --preload-file —
+# (OPTIMIZE=1 runs scripts/optimize_wasm.sh on the module before compressing it.)
 # the demo app (demo/) extracts assets into OPFS once (setup screen) and the
 # wasm mounts them via the wasmfs OPFS backend (BLENDER_WEB_OPFS env, see
 # creator.cc). Outputs into demo/public/:
@@ -9,29 +10,18 @@
 #   wgsl-cache.json       pre-seeded shader translations (copied from web/)
 # The dev fast-path (link_blender_web.sh) is untouched and skips zstd.
 set -euo pipefail
-ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
-export PATH="/opt/homebrew/opt/make/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/opt/findutils/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:/opt/homebrew/sbin:$ROOT/emsdk/upstream/emscripten:$PATH"
-export PYTHON="${PYTHON:-/opt/homebrew/bin/python3}"
-BUILD="$ROOT/build-blender"
-OUT="$ROOT/demo/public"
-SYSROOT="$ROOT/wasm-sysroot"
+source "$(dirname "${BASH_SOURCE[0]}")/link_common.sh"
+OUT="${OUT:-$ROOT/demo/public}"
 STAGE="$ROOT/demo/.stage"
+LINK_OPT="${LINK_OPT:--O1}"
+ZSTD_LEVEL="${ZSTD_LEVEL:-21}"
 
 mkdir -p "$OUT"
 
-# --- stage runtime assets (same trims as the dev script) --------------------
-echo ">> staging assets -> $STAGE"
-rm -rf "$STAGE"; mkdir -p "$STAGE/5.3" "$STAGE/lib"
-cp -r "$ROOT/blender/scripts"           "$STAGE/5.3/scripts"
-cp -r "$ROOT/blender/release/datafiles" "$STAGE/5.3/datafiles"
+# --- stage runtime assets ------------------------------------------------------
 # Python under lib/python3.13 so PYTHONHOME=/opfs/assets resolves the stdlib.
-cp -r "$SYSROOT/lib/python3.13" "$STAGE/lib/python3.13"
-( cd "$STAGE/lib/python3.13" && rm -rf test tests idlelib lib2to3 turtledemo tkinter \
-    config-3.13-wasm32-emscripten ensurepip \
-    && find . -name '__pycache__' -type d -prune -exec rm -rf {} + )
-rm -f "$STAGE/5.3/datafiles/splash_template.xcf"
-python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/5.3/datafiles/colormanagement"
+stage_assets "$STAGE" lib/python3.13
+python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/$BLENDER_VERSION_DIR/datafiles/colormanagement"
 
 # --- essentials brush assets -> 5.3/datafiles/assets/brushes -----------------
 # Blender 4.3+ ships sculpt/paint brushes as ID *assets* in the bundled
@@ -53,22 +43,22 @@ python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/5.3/datafiles/colormanagement"
 # always present in CI. Fall back to blender/assets (dev checkout with LFS) or
 # the on-disk native reference only if the vendored copy is somehow missing.
 if [ "${BLENDER_WEB_BUNDLE_BRUSHES:-1}" != "0" ]; then
-  ASSETS_DST="$STAGE/5.3/datafiles/assets"
+  ASSETS_DST="$STAGE/$BLENDER_VERSION_DIR/datafiles/assets"
   sculpt_name="brushes/essentials_brushes-mesh_sculpt.blend"
   ASSETS_SRC=""
   for cand in \
       "$ROOT/demo/brush-assets" \
-      "$ROOT/blender/assets" \
-      $(ls -d "$ROOT"/tests/native/blender-*/5.3/datafiles/assets 2>/dev/null | head -1); do
+      "$BLENDER_SRC/assets" \
+      $(ls -d "$ROOT"/tests/native/blender-*/"$BLENDER_VERSION_DIR"/datafiles/assets 2>/dev/null | head -1); do
     if [ -n "$cand" ] && [ "$(stat -c%s "$cand/$sculpt_name" 2>/dev/null || echo 0)" -ge 1024 ]; then
       ASSETS_SRC="$cand"; break
     fi
   done
   # Last resort for a dev checkout: materialize the LFS content in blender/assets.
-  if [ -z "$ASSETS_SRC" ] && [ -e "$ROOT/blender/assets/$sculpt_name" ]; then
-    ( cd "$ROOT/blender" && git lfs pull --include="assets/brushes/**" ) 2>/dev/null || true
-    [ "$(stat -c%s "$ROOT/blender/assets/$sculpt_name" 2>/dev/null || echo 0)" -ge 1024 ] && \
-      ASSETS_SRC="$ROOT/blender/assets"
+  if [ -z "$ASSETS_SRC" ] && [ -e "$BLENDER_SRC/assets/$sculpt_name" ]; then
+    ( cd "$BLENDER_SRC" && git lfs pull --include="assets/brushes/**" ) 2>/dev/null || true
+    [ "$(stat -c%s "$BLENDER_SRC/assets/$sculpt_name" 2>/dev/null || echo 0)" -ge 1024 ] && \
+      ASSETS_SRC="$BLENDER_SRC/assets"
   fi
   echo ">> brush asset source: ${ASSETS_SRC:-<none found>}"
   sculpt_blend="$ASSETS_SRC/$sculpt_name"
@@ -89,17 +79,13 @@ else
 fi
 
 # --- assets.tar.zst ----------------------------------------------------------
-echo ">> assets.tar.zst (zstd --ultra -21 -T0)"
-( cd "$STAGE" && tar -cf "$OUT/assets.tar" 5.3 lib )
-zstd -f --ultra -21 -T0 "$OUT/assets.tar" -o "$OUT/assets.tar.zst"
+log "assets.tar.zst (zstd --ultra -$ZSTD_LEVEL -T0)"
+( cd "$STAGE" && tar -cf "$OUT/assets.tar" "$BLENDER_VERSION_DIR" lib )
+zstd -f --ultra -"$ZSTD_LEVEL" -T0 "$OUT/assets.tar" -o "$OUT/assets.tar.zst"
 rm -f "$OUT/assets.tar"
 
 # --- link without preload ----------------------------------------------------
-raw=$(ninja -C "$BUILD" -t commands blender | grep -- "-o bin/blender.js" | tail -1)
-cmd=${raw#*&& }
-cmd=${cmd%% && cd *}
-cmd=${cmd/-o bin\/blender.js/-o $OUT/blender.js}
-cmd=${cmd//-sNODERAWFS=1/}
+cmd=$(cmake_link_cmd "$OUT/blender.js")
 
 # Custom wasmfs backends (compiled against emscripten's internal wasmfs headers):
 #  - localdir_backend.cpp: lazy async mount of a user-picked folder (open/save).
@@ -107,11 +93,11 @@ cmd=${cmd//-sNODERAWFS=1/}
 #    verbatim — serves /assets from the in-memory decompressed tar
 #    (Module.geckoProviders[0], built in demo/src/main.js). Zero-copy: files are
 #    views into the one decompressed buffer, materialized on open.
-WASMFS_INC="$ROOT/emsdk/upstream/emscripten/system/lib/wasmfs"
+WASMFS_INC="$EM_BIN/system/lib/wasmfs"
 
 WEB_FLAGS="-pthread \
   -sEXIT_RUNTIME=0 -g2 \
-  -O1 \
+  $LINK_OPT \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=1073741824 -sMAXIMUM_MEMORY=4294967296 \
   -sSTACK_SIZE=16777216 -sDEFAULT_PTHREAD_STACK_SIZE=4194304 \
   -sPTHREAD_POOL_SIZE=32 -sPTHREAD_POOL_SIZE_STRICT=0 \
@@ -125,10 +111,15 @@ WEB_FLAGS="-pthread \
   -sENVIRONMENT=web,worker -sASSERTIONS=1 -sERROR_ON_UNDEFINED_SYMBOLS=0"
 
 echo ">> relinking blender → $OUT/blender.js (release, no preload)"
-( cd "$BUILD" && eval "$cmd $WEB_FLAGS" )
+( cd "$BLENDER_BUILD" && eval "$cmd $WEB_FLAGS" )
 
-echo ">> blender.wasm.zst (zstd --ultra -21 -T0)"
-zstd -f --ultra -21 -T0 "$OUT/blender.wasm" -o "$OUT/blender.wasm.zst"
+if [ "${OPTIMIZE:-0}" = 1 ]; then
+  bash "$ROOT/scripts/optimize_wasm.sh" "$OUT/blender.wasm"
+  rm -f "$OUT/blender.unopt.wasm"
+fi
+
+log "blender.wasm.zst (zstd --ultra -$ZSTD_LEVEL -T0)"
+zstd -f --ultra -"$ZSTD_LEVEL" -T0 "$OUT/blender.wasm" -o "$OUT/blender.wasm.zst"
 rm -f "$OUT/blender.wasm"
 
 cp -f "$ROOT/web/wgsl-cache.json" "$OUT/wgsl-cache.json" 2>/dev/null || true
