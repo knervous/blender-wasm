@@ -1,5 +1,7 @@
 import { defineConfig } from "vite";
 
+import basicSsl from '@vitejs/plugin-basic-ssl'
+
 /* Blender-wasm needs SharedArrayBuffer (pthreads): cross-origin isolation on
  * both the dev server and the preview server. */
 const isolationHeaders = {
@@ -14,9 +16,11 @@ export default defineConfig({
    * (blender.wasm.zst, assets.tar.zst, manifest.json, blender.js) are already
    * document-relative in main.js, so they follow the page's location too. */
   base: "./",
+  plugins: [basicSsl()],
   server: {
     headers: isolationHeaders,
-    allowedHosts: true
+    allowedHosts: true,
+    https: !!process.env.SSL,
   },
   preview: { headers: isolationHeaders },
   build: { target: "esnext" },

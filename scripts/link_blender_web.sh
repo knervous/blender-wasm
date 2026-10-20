@@ -24,6 +24,12 @@ echo ">> staging assets -> $STAGE"
 rm -rf "$STAGE"; mkdir -p "$STAGE/5.3"
 cp -r "$ROOT/blender/scripts"          "$STAGE/5.3/scripts"
 cp -r "$ROOT/blender/release/datafiles" "$STAGE/5.3/datafiles"
+# Cycles' Python add-on lives with its sources, not in scripts/ (CMake installs
+# it); without it the engine is compiled in but cannot be selected.
+if grep -q "^WITH_CYCLES:BOOL=ON" "$BUILD/CMakeCache.txt" 2>/dev/null; then
+  cp -r "$ROOT/blender/intern/cycles/blender/addon" "$STAGE/5.3/scripts/addons_core/cycles"
+  find "$STAGE/5.3/scripts/addons_core/cycles" -name '__pycache__' -type d -prune -exec rm -rf {} +
+fi
 cp -r "$SYSROOT/lib/python3.13" "$STAGE/python3.13"
 # Trim weight not needed at runtime (tests, caches, dev-only modules).
 ( cd "$STAGE/python3.13" && rm -rf test tests idlelib lib2to3 turtledemo tkinter \

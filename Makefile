@@ -12,7 +12,7 @@
 
 ROOT          := $(CURDIR)
 BLENDER_URL   := https://github.com/HeyPuter/blender
-BLENDER_REF   := 6b031d3d41c392883e3c495aa72343e10d15b43d
+BLENDER_REF   := fe16888d9e1e5eee3070535a221dd9ae2d671a77
 # NOTE: ':=' (not '?=') so a stale exported EMSDK in the environment cannot
 # point us at the wrong tree. Command-line `make EMSDK=...` still overrides.
 EMSDK         := $(ROOT)/emsdk
@@ -47,7 +47,7 @@ NPROC         := $(shell nproc)
 WASM_CFLAGS   := -O2 -pthread -msimd128 -msse4.2 -fexceptions
 WASM_CXXFLAGS := $(WASM_CFLAGS)
 
-.PHONY: all mvp toolchain blender blender-assets deps configure-cycles cycles cycles-web configure-blender blender-web verify-blender-webgpu web smoke serve verify verify-render verify-webgpu clean-build print-env
+.PHONY: all mvp toolchain blender blender-assets deps configure-cycles cycles cycles-web configure-blender blender-web configure-blender-gl blender-gl blender-release-gl verify-blender-webgpu web smoke serve verify verify-render verify-webgpu clean-build print-env
 
 all: toolchain blender
 
@@ -154,7 +154,7 @@ cycles-web: cycles
 # datafiles. Host codegen tools (makesdna/makesrna/datatoc/shader_tool) run via
 # node (wiring committed in the fork). Build dir: build-blender.
 # ---------------------------------------------------------------------------
-configure-blender: toolchain blender blender-assets deps dep-python
+configure-blender: toolchain blender blender-assets deps dep-python dep-numpy
 	bash scripts/build_shader_tool_native.sh   # native codegen tool (wasm one is buggy)
 	$(EM_ENV) "$(EMCMAKE)" cmake -S blender -B build-blender -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
@@ -163,6 +163,29 @@ configure-blender: toolchain blender blender-assets deps dep-python
 		-DCMAKE_CXX_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
 		-DWITH_WEBGPU_BACKEND=ON \
 		-C $(ROOT)/cmake/blender-wasm-cache.cmake
+
+# ---------------------------------------------------------------------------
+# Full Blender on its OpenGL backend, running on wink — Mesa's GL on WebGPU
+# (github.com/MercuryWorkshop/mesa-wink, patched by scripts/build_wink.sh) —
+# instead of the custom WebGPU GPU backend. Adds Cycles. Build dir:
+# build-blender-gl. The standalone exe link at the end of `ninja blender`
+# fails on purpose (see CI); blender-release-gl is the real link.
+# ---------------------------------------------------------------------------
+configure-blender-gl: toolchain blender blender-assets deps dep-python dep-numpy dep-epoxy dep-wink
+	bash scripts/build_shader_tool_native.sh
+	$(EM_ENV) "$(EMCMAKE)" cmake -S blender -B build-blender-gl -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_PREFIX_PATH="$(SYSROOT)" -DCMAKE_FIND_ROOT_PATH="$(SYSROOT)" \
+		-DCMAKE_C_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
+		-DCMAKE_CXX_FLAGS="-pthread -fexceptions $(WASM_COMPAT)" \
+		-C $(ROOT)/cmake/blender-wasm-gl-cache.cmake
+
+blender-gl: configure-blender-gl
+	$(EM_ENV) ninja -C build-blender-gl blender || true
+
+# demo/public/{blender.js,blender.wasm.zst,assets.tar.zst} from build-blender-gl.
+blender-release-gl: blender-gl
+	BLENDER_GPU=gl bash scripts/link_blender_release.sh
 
 # ---------------------------------------------------------------------------
 # Full Blender → browser (WebGPU). Web-relink the built blender objects with

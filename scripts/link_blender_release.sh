@@ -8,11 +8,25 @@
 #   assets.tar.zst        5.3/ + lib/python3.13/ (PYTHONHOME=/opfs/assets)
 #   wgsl-cache.json       pre-seeded shader translations (copied from web/)
 # The dev fast-path (link_blender_web.sh) is untouched and skips zstd.
+#
+# BLENDER_GPU selects the graphics stack the build tree was configured for:
+#   gl     (default) OpenGL backend on wink — Mesa's GL on WebGPU
+#          (cmake/blender-wasm-gl-cache.cmake, build tree build-blender-gl).
+#          The canvas stays on the browser main thread, where wink runs the
+#          driver; Blender's pthreads marshal GL to it (no OffscreenCanvas).
+#   webgpu the custom WebGPU GPU backend (cmake/blender-wasm-cache.cmake,
+#          build tree build-blender); the canvas is transferred to the
+#          Blender pthread as an OffscreenCanvas.
 set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export PATH="$ROOT/emsdk/upstream/emscripten:$PATH"
-BUILD="$ROOT/build-blender"
-OUT="$ROOT/demo/public"
+BLENDER_GPU="${BLENDER_GPU:-gl}"
+case "$BLENDER_GPU" in
+  gl)     BUILD="${BUILD:-$ROOT/build-blender-gl}" ;;
+  webgpu) BUILD="${BUILD:-$ROOT/build-blender}" ;;
+  *) echo "BLENDER_GPU must be gl or webgpu" >&2; exit 1 ;;
+esac
+OUT="${OUT:-$ROOT/demo/public}"
 SYSROOT="$ROOT/wasm-sysroot"
 STAGE="$ROOT/demo/.stage"
 
@@ -23,6 +37,12 @@ echo ">> staging assets -> $STAGE"
 rm -rf "$STAGE"; mkdir -p "$STAGE/5.3" "$STAGE/lib"
 cp -r "$ROOT/blender/scripts"           "$STAGE/5.3/scripts"
 cp -r "$ROOT/blender/release/datafiles" "$STAGE/5.3/datafiles"
+# Cycles' Python add-on lives with its sources, not in scripts/ (CMake installs
+# it); without it the engine is compiled in but cannot be selected.
+if grep -q "^WITH_CYCLES:BOOL=ON" "$BUILD/CMakeCache.txt" 2>/dev/null; then
+  cp -r "$ROOT/blender/intern/cycles/blender/addon" "$STAGE/5.3/scripts/addons_core/cycles"
+  find "$STAGE/5.3/scripts/addons_core/cycles" -name '__pycache__' -type d -prune -exec rm -rf {} +
+fi
 # Python under lib/python3.13 so PYTHONHOME=/opfs/assets resolves the stdlib.
 cp -r "$SYSROOT/lib/python3.13" "$STAGE/lib/python3.13"
 ( cd "$STAGE/lib/python3.13" && rm -rf test tests idlelib lib2to3 turtledemo tkinter \
@@ -107,6 +127,22 @@ cmd=${cmd//-sNODERAWFS=1/}
 #    views into the one decompressed buffer, materialized on open.
 WASMFS_INC="$ROOT/emsdk/upstream/emscripten/system/lib/wasmfs"
 
+if [ "$BLENDER_GPU" = gl ]; then
+  # wink: Mesa (st/mesa + gex_wgpu + GLSL/NIR), emdawnwebgpu's webgpu.cpp and
+  # Tint, plus their JS libraries in the order wink's manifest lists them.
+  # (scripts/build_wink.sh.) The build tree's CMAKE_EXE_LINKER_FLAGS are empty,
+  # so the extra system ports / libs the WebGPU tree carried there come here.
+  WINK="$ROOT/wasm-sysroot/wink"
+  GPU_FLAGS="$WINK/lib/libwink.a $WINK/lib/libwink_webgpu.a $WINK/lib/libwink_tint.a \
+    $(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(" ".join("--js-library "+sys.argv[2]+"/"+j for j in m["link"]["js_libraries"]))' "$WINK/manifest.json" "$WINK") \
+    -sWASM_BIGINT=1 \
+    -sEXPORTED_FUNCTIONS=_main,_malloc,_free \
+    --use-port=sqlite3 --use-port=bzip2 -Wl,--allow-multiple-definition \
+    $SYSROOT/lib/libbrotlidec.a $SYSROOT/lib/libbrotlicommon.a $ROOT/cmake/stubs/extra_stubs.o"
+else
+  GPU_FLAGS="-sOFFSCREENCANVAS_SUPPORT=1 -sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
+fi
+
 WEB_FLAGS="-pthread \
   -sEXIT_RUNTIME=0 -g2 \
   -O1 \
@@ -114,13 +150,22 @@ WEB_FLAGS="-pthread \
   -sSTACK_SIZE=16777216 -sDEFAULT_PTHREAD_STACK_SIZE=4194304 \
   -sPTHREAD_POOL_SIZE=32 -sPTHREAD_POOL_SIZE_STRICT=0 \
   -sPROXY_TO_PTHREAD=1 \
-  -sOFFSCREENCANVAS_SUPPORT=1 -sOFFSCREENCANVASES_TO_PTHREAD=#canvas \
+  $GPU_FLAGS \
   -sWASMFS -sFORCE_FILESYSTEM=1 \
   -std=c++17 -I$WASMFS_INC $ROOT/demo/localdir_backend.cpp $ROOT/demo/provider_backend.cpp \
   --js-library $ROOT/demo/localdir_lib.js \
   --js-library $ROOT/demo/provider-fs.js \
-  -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPF32 \
+  -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPU32,HEAPF32 \
   -sENVIRONMENT=web,worker -sASSERTIONS=1 -sERROR_ON_UNDEFINED_SYMBOLS=0"
+
+# NumPy as builtin modules (scripts/build_numpy.sh): the constructor in
+# numpy_inittab.o registers them and pulls the extension objects from the
+# archive. Its Python package ships in assets via lib/python3.13/site-packages.
+if [ -f "$SYSROOT/lib/numpy_inittab.o" ]; then
+  WEB_FLAGS="$WEB_FLAGS $SYSROOT/lib/numpy_inittab.o $SYSROOT/lib/libnumpy.a"
+else
+  echo "!! WARNING: numpy not built (scripts/build_numpy.sh) — add-ons that import numpy (glTF, FBX, ...) will fail"
+fi
 
 echo ">> relinking blender → $OUT/blender.js (release, no preload)"
 ( cd "$BUILD" && eval "$cmd $WEB_FLAGS" )
@@ -129,7 +174,16 @@ echo ">> blender.wasm.zst (zstd --ultra -21 -T0)"
 zstd -f --ultra -21 -T0 "$OUT/blender.wasm" -o "$OUT/blender.wasm.zst"
 rm -f "$OUT/blender.wasm"
 
-cp -f "$ROOT/web/wgsl-cache.json" "$OUT/wgsl-cache.json" 2>/dev/null || true
+if [ "$BLENDER_GPU" = gl ]; then
+  # wink's SPIR-V -> WGSL translations for the shaders the common paths use
+  # (made by `DUMP_WGSL=demo/wgsl-cache-gl.bin TAG=dump node
+  # scripts/compat_suite.mjs demo/dist`, then zstd -19). wink refuses a blob
+  # from a different Tint build whole, so a stale one only costs its download.
+  cp -f "$ROOT/demo/wgsl-cache-gl.bin.zst" "$OUT/wgsl-cache-gl.bin.zst" 2>/dev/null || true
+else
+  rm -f "$OUT/wgsl-cache-gl.bin.zst"
+  cp -f "$ROOT/web/wgsl-cache.json" "$OUT/wgsl-cache.json" 2>/dev/null || true
+fi
 
 # Manifest with decompressed sizes (zstddec wants explicit sizes).
 python3 - "$OUT" <<'PYEOF'
@@ -139,7 +193,9 @@ import subprocess
 import sys
 out = sys.argv[1]
 sizes = {}
-for name in ("blender.wasm.zst", "assets.tar.zst"):
+for name in ("blender.wasm.zst", "assets.tar.zst", "wgsl-cache-gl.bin.zst"):
+    if not os.path.exists(os.path.join(out, name)):
+        continue
     r = subprocess.run(["zstd", "-lv", os.path.join(out, name)], capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if "Decompressed Size" in line:

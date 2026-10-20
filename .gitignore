@@ -43,9 +43,11 @@
 /demo/public/assets.tar.zst
 /demo/public/manifest.json
 /demo/public/wgsl-cache.json
+/demo/public/wgsl-cache-gl.bin.zst
 
 # misc
 *.o
 *.a
 /scratchpad/
 .DS_Store
+/build-blender-gl/

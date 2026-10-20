@@ -1,0 +1,2444 @@
+diff --git a/src/gallium/drivers/gex_wgpu/gex_wgpu_screen.c b/src/gallium/drivers/gex_wgpu/gex_wgpu_screen.c
+index 9a8a3e0..e9dff17 100644
+--- a/src/gallium/drivers/gex_wgpu/gex_wgpu_screen.c
++++ b/src/gallium/drivers/gex_wgpu/gex_wgpu_screen.c
+@@ -144,6 +144,8 @@ extern void gex_wgpu_jspi_signal(void);
+  * together made glDrawArrays report its first vertex as the base vertex. */
+ #define GEX_WGPU_DRAW_PARAM_FIRST_VERTEX 3
+ #define GEX_WGPU_DRAW_PARAM_WORDS 4
++/* gex_wgpu_draw_native_indirect's copies of drawIndirect commands. */
++#define GEX_WGPU_INDIRECT_SCRATCH_BYTES (64u * 1024u)
+ #define GEX_WGPU_BUFTEX_FIRST_BINDING \
+    (GEX_WGPU_IMAGE_FIRST_BINDING + GEX_WGPU_MAX_SHADER_IMAGES)
+ /* Textures and samplers for a *compute* shader. The graphics stages number
+@@ -1870,6 +1872,14 @@ struct gex_wgpu_resource {
+       a coherent one is the only kind that has to be up to date without the
+       application asking. */
+    unsigned persistent_usage;
++   /* The context whose persistent list holds this buffer. GL buffers are
++    * shared, so the unmap -- or the delete -- can come from another context
++    * than the map did, and the list it is on has to be the one it leaves;
++    * otherwise that context's next submit uploads through a freed buffer. */
++   struct gex_wgpu_context *persistent_ctx;
++   /* A refresh of a read-only persistent mapping started at a memory barrier
++    * and not yet copied into the shadow; see gex_wgpu_refresh_begin. */
++   struct gex_wgpu_pending_refresh *pending_refresh;
+    uint64_t allocation_size;
+    /* The WGPU buffer's real size and usage, which is allocation_size and the
+     * usage it was created with until a shader forces a bigger one -- see
+@@ -2037,6 +2047,9 @@ struct gex_wgpu_repeat_cmd {
+ struct gex_wgpu_context {
+    struct pipe_context base;
+    bool failed;
++   /* Set around a draw's outermost sampler-view refresh: cross-class copies
++    * are recorded on the pending encoder instead of submitted. */
++   bool refresh_into_pending;
+    /* How deep draw_vbo is in itself. u_primconvert and the primitive-restart
+     * split both re-enter it, and either can be handed a draw it converts to
+     * something it converts again -- which is unbounded recursion on a 16 MiB
+@@ -2190,6 +2203,19 @@ struct gex_wgpu_context {
+    /* Set while a provoking-vertex rewrite is re-issuing its draw, so the
+     * rewrite does not see its own output and recurse. */
+    bool provoking_rewritten;
++   /* ARB_draw_indirect taken natively (gex_wgpu_draw_native_indirect): while
++    * `active`, the draw being recorded takes its counts from `buffer` at
++    * `offset` on the GPU rather than from its own (placeholder) draw. */
++   struct {
++      bool active;
++      struct pipe_resource *buffer;
++      unsigned offset;
++      unsigned draw_params_offset;
++   } native_indirect;
++   /* drawIndirect arguments, copied out of the application's command on the
++    * GPU with firstInstance left zero; see gex_wgpu_draw_native_indirect. */
++   WGPUBuffer indirect_scratch;
++   unsigned indirect_scratch_next;
+    /* The same, for the wide-line rewrite, whose own draw is triangles and so
+     * could not recurse -- but the flag also keeps the point expansion and
+     * every other rewrite from second-guessing a draw this one built. */
+@@ -2943,6 +2969,10 @@ struct gex_wgpu_shader {
+     * fragment stage's qualifier as the meaning, so the vertex stage is
+     * rewritten to match -- see gex_wgpu_interp_variant_get. */
+    uint8_t varying_interp[GEX_WGPU_MAX_VARYING_LOCATIONS];
++   /* Vertex stage: the varying locations whose value cannot differ between
++    * the vertices of one primitive (gex_wgpu_vertex_invariant_outputs), for
++    * which the provoking vertex convention makes no difference. */
++   uint64_t vertex_invariant_outputs;
+    /* Bit 0 centroid, bit 1 sample, which the interpolation mode does not
+     * carry and which WebGPU requires both stages to agree on. */
+    uint8_t varying_aux[GEX_WGPU_MAX_VARYING_LOCATIONS];
+@@ -3848,6 +3878,15 @@ struct gex_wgpu_transfer {
+    bool staged_write;
+ };
+ 
++/* The fence gex_wgpu_flush hands out; see gex_wgpu_fence_finish. */
++static char gex_wgpu_fence_sentinel_storage;
++#define gex_wgpu_fence_sentinel \
++   ((struct pipe_fence_handle *)&gex_wgpu_fence_sentinel_storage)
++static void gex_wgpu_refresh_finish(struct gex_wgpu_resource *gex);
++struct gex_wgpu_context;
++static bool gex_wgpu_refresh_begin(struct gex_wgpu_context *ctx,
++                                   struct gex_wgpu_resource *gex, uint32_t size);
++
+ struct gex_wgpu_map_state {
+    WGPUMapAsyncStatus status;
+    bool done;
+@@ -6681,6 +6720,10 @@ static WGPUTexture gex_wgpu_rt_scratch_ensure(struct gex_wgpu_context *ctx,
+                                               struct pipe_resource *resource,
+                                               enum pipe_format format,
+                                               unsigned level);
++static void gex_wgpu_rt_scratch_copy_into(struct gex_wgpu_context *ctx,
++                                          struct pipe_resource *resource,
++                                          unsigned layer, bool into_scratch,
++                                          WGPUCommandEncoder into);
+ static void gex_wgpu_rt_scratch_copy(struct gex_wgpu_context *ctx,
+                                      struct pipe_resource *resource,
+                                      unsigned layer, bool into_scratch);
+@@ -6805,6 +6848,7 @@ static uint8_t *
+ gex_wgpu_shadow_for_read(struct pipe_context *pipe,
+                          struct gex_wgpu_resource *gex)
+ {
++   gex_wgpu_refresh_finish(gex);
+    if (gex->shadow)
+       return gex->shadow;
+    const bool needs_contents = gex->bytes_written != 0 || gex->gpu_written;
+@@ -7103,6 +7147,8 @@ gex_wgpu_mark_failed(struct gex_wgpu_context *ctx, const char *fn, int line)
+ 
+ #define gex_fail(ctx) gex_wgpu_mark_failed((ctx), __func__, __LINE__)
+ 
++
++
+ /* Reported the same way and *not* latched.
+  *
+  * For an operation this backend cannot serve where the device is untouched:
+@@ -13141,6 +13187,8 @@ gex_wgpu_original_clone(const struct gex_wgpu_shader *shader)
+    return nir_deserialize(NULL, shader->original_nir->options, &reader);
+ }
+ 
++static uint64_t gex_wgpu_vertex_invariant_outputs(nir_shader *nir);
++
+ static struct gex_wgpu_shader *
+ gex_wgpu_create_shader_state(struct pipe_context *pipe,
+                              const struct pipe_shader_state *state,
+@@ -13302,6 +13350,9 @@ gex_wgpu_create_shader_state(struct pipe_context *pipe,
+     * was the offset no longer needs the sample-position variant at all. */
+    gex_wgpu_lower_sample_interp(nir);
+ 
++   if (expected_stage == MESA_SHADER_VERTEX)
++      shader->vertex_invariant_outputs = gex_wgpu_vertex_invariant_outputs(nir);
++
+    /* What this stage says about each varying's interpolation, recorded by the
+     * @location ntv will emit. The fragment stage's is the one GL means; the
+     * vertex stage's only has to agree with it, which is what the variant
+@@ -19466,7 +19517,9 @@ gex_wgpu_resource_create(struct pipe_screen *screen,
+        * keeps this combination legal. */
+       desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc |
+                    WGPUBufferUsage_Vertex | WGPUBufferUsage_Index |
+-                   WGPUBufferUsage_Uniform | WGPUBufferUsage_Storage;
++                   WGPUBufferUsage_Uniform | WGPUBufferUsage_Storage |
++                   /* Read by gex_wgpu_draw_native_indirect's copies. */
++                   WGPUBufferUsage_Indirect;
+       /* A vertex state *is* a vertex buffer with a layout attached, and
+        * Mesa's display-list recorder tags its buffers with only that bind
+        * even though it goes on to bind them through set_vertex_buffers when
+@@ -19824,6 +19877,11 @@ gex_wgpu_resource_destroy(struct pipe_screen *screen,
+    GEX_DEVICE_GUARD(gex_screen(screen));
+    struct gex_wgpu_screen *gscreen = gex_screen(screen);
+    struct gex_wgpu_resource *gex = gex_resource(resource);
++   gex_wgpu_refresh_finish(gex);
++   /* Off whatever context's persistent list it is still on: deleting a GL
++    * buffer unmaps it, but in the context that deletes it. */
++   if (gex->persistent_ctx)
++      gex_wgpu_track_persistent_map(gex->persistent_ctx, resource, false);
+    /* Nothing is invalidated here any more. Letting these go hands their
+     * handles back for reuse, and a cached bind group key names its objects by
+     * handle -- but the cache now holds its own reference to everything its
+@@ -22941,6 +22999,7 @@ gex_wgpu_buffer_map(struct pipe_context *pipe, struct pipe_resource *resource,
+    struct gex_wgpu_context *ctx = (struct gex_wgpu_context *)pipe;
+    struct gex_wgpu_resource *gex = gex_resource(resource);
+    *out_transfer = NULL;
++   gex_wgpu_refresh_finish(gex);
+    /* Deliberately *not* gated on ctx->failed. Mesa turns a NULL map into
+     * GL_OUT_OF_MEMORY and applications dereference the result: Blender is
+     * killed that way by a colour-target refusal it would otherwise have
+@@ -25006,6 +25065,17 @@ struct gex_wgpu_compute_state {
+    uint32_t buftex_bindings[GEX_WGPU_MAX_BUFFER_TEXTURES];
+    nir_shader *nir;
+    struct gex_wgpu_compute_variant *variants;
++   /* Pipelines built for this shader, by module (the shader or one of its
++    * variants) and layout (the screen's cached one). launch_grid built one per
++    * dispatch, and Blender's draw manager dispatches a few times a frame:
++    * each a pipeline creation, which the browser's GPU process validates
++    * before anything queued behind it. */
++   struct {
++      WGPUShaderModule module;
++      WGPUPipelineLayout layout;
++      WGPUComputePipeline pipeline;
++   } pipelines[8];
++   unsigned pipeline_count;
+ };
+ 
+ /* One compute module per sampler configuration; see integer_sampled_slots.
+@@ -25797,10 +25867,22 @@ gex_wgpu_delete_compute_state(struct pipe_context *pipe, void *state)
+       }
+       if (compute->nir)
+          ralloc_free(compute->nir);
++      for (unsigned i = 0; i < compute->pipeline_count; ++i)
++         wgpuComputePipelineRelease(compute->pipelines[i].pipeline);
+    }
+    FREE(compute);
+ }
+ 
++static WGPUBindGroupLayout
++gex_wgpu_cached_bind_group_layout(struct gex_wgpu_screen *screen,
++                                  const char *label,
++                                  const WGPUBindGroupLayoutEntry *entries,
++                                  unsigned count);
++static WGPUPipelineLayout
++gex_wgpu_cached_pipeline_layout(struct gex_wgpu_screen *screen,
++                                const char *label,
++                                WGPUBindGroupLayout *layouts, unsigned count);
++
+ static void
+ gex_wgpu_launch_grid(struct pipe_context *pipe,
+                      const struct pipe_grid_info *info)
+@@ -26360,21 +26442,36 @@ gex_wgpu_launch_grid(struct pipe_context *pipe,
+          return;
+       }
+    }
+-   WGPUBindGroupLayoutDescriptor layout_desc =
+-      WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+-   layout_desc.entryCount = count;
+-   layout_desc.entries = entries;
+-   layout_desc.label = (WGPUStringView){"launch_grid g0", WGPU_STRLEN};
++   /* The layouts come from the screen's caches, which own them, and the
++    * pipeline from this shader's own; a layout too big for the cache is
++    * built, used and released here as before. */
+    WGPUBindGroupLayout layout =
+-      wgpuDeviceCreateBindGroupLayout(screen->device, &layout_desc);
+-   WGPUPipelineLayoutDescriptor pipeline_layout_desc =
+-      WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+-   pipeline_layout_desc.bindGroupLayoutCount = count ? 1 : 0;
+-   pipeline_layout_desc.bindGroupLayouts = count ? &layout : NULL;
+-   pipeline_layout_desc.label =
+-      (WGPUStringView){"launch_grid layout", WGPU_STRLEN};
++      count ? gex_wgpu_cached_bind_group_layout(screen, "launch_grid g0",
++                                                entries, count)
++            : NULL;
+    WGPUPipelineLayout pipeline_layout =
+-      wgpuDeviceCreatePipelineLayout(screen->device, &pipeline_layout_desc);
++      !count || layout
++         ? gex_wgpu_cached_pipeline_layout(screen, "launch_grid layout",
++                                           count ? &layout : NULL,
++                                           count ? 1 : 0)
++         : NULL;
++   const bool cached_layouts = (!count || layout) && pipeline_layout;
++   if (!cached_layouts) {
++      WGPUBindGroupLayoutDescriptor layout_desc =
++         WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
++      layout_desc.entryCount = count;
++      layout_desc.entries = entries;
++      layout_desc.label = (WGPUStringView){"launch_grid g0", WGPU_STRLEN};
++      layout = wgpuDeviceCreateBindGroupLayout(screen->device, &layout_desc);
++      WGPUPipelineLayoutDescriptor pipeline_layout_desc =
++         WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
++      pipeline_layout_desc.bindGroupLayoutCount = count ? 1 : 0;
++      pipeline_layout_desc.bindGroupLayouts = count ? &layout : NULL;
++      pipeline_layout_desc.label =
++         (WGPUStringView){"launch_grid layout", WGPU_STRLEN};
++      pipeline_layout =
++         wgpuDeviceCreatePipelineLayout(screen->device, &pipeline_layout_desc);
++   }
+ 
+    WGPUComputePipelineDescriptor pipeline_desc =
+       WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+@@ -26390,14 +26487,42 @@ gex_wgpu_launch_grid(struct pipe_context *pipe,
+          fprintf(stderr, "gex-wgpu: dispatch declined (no compute module for "
+                          "this sampler state)\n");
+       }
+-      wgpuBindGroupLayoutRelease(layout);
+-      wgpuPipelineLayoutRelease(pipeline_layout);
++      if (!cached_layouts) {
++         wgpuBindGroupLayoutRelease(layout);
++         wgpuPipelineLayoutRelease(pipeline_layout);
++      }
+       return;
+    }
+    pipeline_desc.compute.module = compute_module;
+    pipeline_desc.compute.entryPoint = (WGPUStringView){"main", WGPU_STRLEN};
+-   WGPUComputePipeline pipeline =
+-      wgpuDeviceCreateComputePipeline(screen->device, &pipeline_desc);
++   WGPUComputePipeline pipeline = NULL;
++   if (cached_layouts) {
++      simple_mtx_lock(&screen->cache_lock);
++      for (unsigned i = 0; i < compute->pipeline_count; ++i)
++         if (compute->pipelines[i].module == compute_module &&
++             compute->pipelines[i].layout == pipeline_layout) {
++            pipeline = compute->pipelines[i].pipeline;
++            break;
++         }
++      simple_mtx_unlock(&screen->cache_lock);
++      if (pipeline) {
++         wgpuComputePipelineAddRef(pipeline);
++      } else {
++         pipeline =
++            wgpuDeviceCreateComputePipeline(screen->device, &pipeline_desc);
++         simple_mtx_lock(&screen->cache_lock);
++         if (pipeline && compute->pipeline_count < ARRAY_SIZE(compute->pipelines)) {
++            const unsigned i = compute->pipeline_count++;
++            compute->pipelines[i].module = compute_module;
++            compute->pipelines[i].layout = pipeline_layout;
++            compute->pipelines[i].pipeline = pipeline;
++            wgpuComputePipelineAddRef(pipeline);
++         }
++         simple_mtx_unlock(&screen->cache_lock);
++      }
++   } else {
++      pipeline = wgpuDeviceCreateComputePipeline(screen->device, &pipeline_desc);
++   }
+ 
+    WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+    group_desc.layout = layout;
+@@ -26442,8 +26567,10 @@ gex_wgpu_launch_grid(struct pipe_context *pipe,
+    if (encoder) gex_wgpu_local_encoder_release(screen, encoder);
+    if (group) wgpuBindGroupRelease(group);
+    if (pipeline) wgpuComputePipelineRelease(pipeline);
+-   if (pipeline_layout) wgpuPipelineLayoutRelease(pipeline_layout);
+-   if (layout) wgpuBindGroupLayoutRelease(layout);
++   if (!cached_layouts) {
++      if (pipeline_layout) wgpuPipelineLayoutRelease(pipeline_layout);
++      if (layout) wgpuBindGroupLayoutRelease(layout);
++   }
+ 
+ release_views:
+    /* The image views are built per dispatch, because glBindImageTexture
+@@ -26474,12 +26601,16 @@ gex_wgpu_memory_barrier(struct pipe_context *pipe, unsigned flags)
+    if (gex_wgpu_persist_log())
+       fprintf(stderr, "PERSIST barrier flags=0x%x persistent_count=%u\n",
+               flags, ctx->persistent_count);
+-   gex_wgpu_submit_pending(ctx);
+-   /* Everything this driver submits goes to one WebGPU queue in order, so
+-    * ordering needs nothing further -- but a persistent mapping *is* mapped
+-    * while the GPU writes it, which is what this comment used to deny. This
+-    * is the point GL says those writes become visible to the client. */
++   /* Everything this driver records goes to one WebGPU queue in order, and
++    * WebGPU synchronises one pass's writes with the next pass's reads inside
++    * an encoder, so ordering alone needs no submit: every entry point that
++    * touches the device outside the encoder submits first anyway. Blender's
++    * draw manager issues a barrier after each of its dispatches, and
++    * submitting for each was a twelfth of its submits. But a persistent
++    * mapping *is* mapped while the GPU writes it, and this is the point GL
++    * says those writes become visible to the client. */
+    if (flags & PIPE_BARRIER_MAPPED_BUFFER) {
++      gex_wgpu_submit_pending(ctx);
+       GEX_DEVICE_GUARD(gex_screen(pipe->screen));
+       gex_wgpu_refresh_persistent_maps(ctx, false);
+    }
+@@ -26673,13 +26804,30 @@ gex_wgpu_sampler_view_refresh(struct pipe_context *pipe,
+    struct gex_wgpu_resource *source = gex_resource(view->base.texture);
+    if (!source->texture || view->reinterpret_serial == source->write_serial)
+       return;
+-   /* The source's writes have to reach the queue before they are copied. */
+-   gex_wgpu_submit_pending(ctx);
++   /* The source's writes have to be ordered before the copy: by submitting
++    * them -- or, at a draw's outermost entry, where nothing of the draw is
++    * recorded yet, by recording the copy behind them on the same encoder.
++    * Blender's viewport samples several such views a frame, and a submit for
++    * each was an eighth of its submits. */
++   const bool behind = ctx->refresh_into_pending;
++   if (!behind)
++      gex_wgpu_submit_pending(ctx);
++   else
++      gex_wgpu_end_pass(ctx);
+    struct gex_wgpu_screen *screen = gex_screen(pipe->screen);
+    WGPUCommandEncoder encoder =
+-      gex_wgpu_local_encoder(screen);
++      behind ? gex_wgpu_pending_encoder(ctx) : gex_wgpu_local_encoder(screen);
+    if (!encoder)
+       return;
++   /* A source being rendered through its scratch gets its bytes back at a
++    * submit, which recording behind skips -- so they go back here first. */
++   if (behind) {
++      for (unsigned i = 0; i < ctx->color_count; ++i)
++         if (ctx->colors[i] == view->base.texture &&
++             gex_wgpu_color_needs_scratch(ctx->color_formats[i], ctx->colors[i]))
++            gex_wgpu_rt_scratch_copy_into(ctx, ctx->colors[i],
++                                          ctx->color_layers[i], false, encoder);
++   }
+    WGPUTexelCopyTextureInfo from = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+    from.texture = source->texture;
+    from.mipLevel = view->base.u.tex.first_level;
+@@ -26702,12 +26850,14 @@ gex_wgpu_sampler_view_refresh(struct pipe_context *pipe,
+    into.origin = (WGPUOrigin3D){0, 0, 0};
+    into.aspect = WGPUTextureAspect_All;
+    wgpuCommandEncoderCopyBufferToTexture(encoder, &staging, &into, &extent);
+-   WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
+-   gex_wgpu_local_encoder_release(screen, encoder);
+-   if (!commands)
+-      return;
+-   gex_wgpu_queue_submit(screen, 1, &commands);
+-   wgpuCommandBufferRelease(commands);
++   if (!behind) {
++      WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
++      gex_wgpu_local_encoder_release(screen, encoder);
++      if (!commands)
++         return;
++      gex_wgpu_queue_submit(screen, 1, &commands);
++      wgpuCommandBufferRelease(commands);
++   }
+    view->reinterpret_serial = source->write_serial;
+ }
+ 
+@@ -26826,18 +26976,19 @@ gex_wgpu_rt_scratch_ensure(struct gex_wgpu_context *ctx,
+ /* Moves one level of one layer between the texture and its scratch. The two
+  * are equal in bytes per texel, so the buffer in between needs no conversion.
+  * Recorded on its own command buffer and submitted, which is what orders it:
+- * the caller submits the work that produced the bytes first. */
++ * the caller submits the work that produced the bytes first -- or, given an
++ * encoder (the context's pending one, outside a pass), recorded on that
++ * behind the work it follows, which orders it without a submit. */
+ static void
+-gex_wgpu_rt_scratch_copy(struct gex_wgpu_context *ctx,
+-                         struct pipe_resource *resource, unsigned layer,
+-                         bool into_scratch)
++gex_wgpu_rt_scratch_copy_into(struct gex_wgpu_context *ctx,
++                              struct pipe_resource *resource, unsigned layer,
++                              bool into_scratch, WGPUCommandEncoder into)
+ {
+    struct gex_wgpu_resource *gex = gex_resource(resource);
+    if (!gex->texture || !gex->rt_scratch || !gex->rt_scratch_staging)
+       return;
+    struct gex_wgpu_screen *screen = gex_screen(ctx->base.screen);
+-   WGPUCommandEncoder encoder =
+-      gex_wgpu_local_encoder(screen);
++   WGPUCommandEncoder encoder = into ? into : gex_wgpu_local_encoder(screen);
+    if (!encoder)
+       return;
+    WGPUTexelCopyTextureInfo real = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+@@ -26861,12 +27012,14 @@ gex_wgpu_rt_scratch_copy(struct gex_wgpu_context *ctx,
+       encoder, into_scratch ? &real : &scratch, &staging, &extent);
+    wgpuCommandEncoderCopyBufferToTexture(
+       encoder, &staging, into_scratch ? &scratch : &real, &extent);
+-   WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
+-   gex_wgpu_local_encoder_release(screen, encoder);
+-   if (!commands)
+-      return;
+-   gex_wgpu_queue_submit(screen, 1, &commands);
+-   wgpuCommandBufferRelease(commands);
++   if (!into) {
++      WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
++      gex_wgpu_local_encoder_release(screen, encoder);
++      if (!commands)
++         return;
++      gex_wgpu_queue_submit(screen, 1, &commands);
++      wgpuCommandBufferRelease(commands);
++   }
+    if (!into_scratch) {
+       /* The texture has new bytes, so a reinterpreting sampler view of it
+        * has to copy them again. */
+@@ -26875,6 +27028,14 @@ gex_wgpu_rt_scratch_copy(struct gex_wgpu_context *ctx,
+    }
+ }
+ 
++static void
++gex_wgpu_rt_scratch_copy(struct gex_wgpu_context *ctx,
++                         struct pipe_resource *resource, unsigned layer,
++                         bool into_scratch)
++{
++   gex_wgpu_rt_scratch_copy_into(ctx, resource, layer, into_scratch, NULL);
++}
++
+ static void
+ gex_wgpu_render_condition(struct pipe_context *pipe, struct pipe_query *query,
+                           bool condition, enum pipe_render_cond_flag mode)
+@@ -27675,6 +27836,18 @@ gex_wgpu_resolve(struct pipe_context *pipe, struct pipe_resource *dst,
+    return true;
+ }
+ 
++/* GEX_WGPU_FLIP_BY_ROWS keeps flipped blits on the one-copy-per-row path. */
++static bool
++gex_wgpu_flip_by_rows(void)
++{
++   static int v = -1;
++   if (v < 0) {
++      const char *e = getenv("GEX_WGPU_FLIP_BY_ROWS");
++      v = e && *e && *e != '0';
++   }
++   return v;
++}
++
+ /* A blit the copy path cannot serve -- a format conversion, a scale, a flip, a
+  * partial write mask -- becomes a textured draw.
+  *
+@@ -27974,7 +28147,11 @@ gex_wgpu_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+                               info->src.box.width, info->src.box.height,
+                               info->dst.box.width, info->dst.box.height);
+    GEX_DEVICE_GUARD(gex_screen(pipe->screen));
+-   gex_wgpu_submit_pending((struct gex_wgpu_context *)pipe);
++   /* Not submitted here: a blit u_blitter draws is recorded on the pending
++    * encoder like any draw, and Blender blits several times a frame -- the
++    * most common reason its batches were broken. The paths that record on
++    * an encoder of their own (resolve, copy) submit first themselves, and
++    * the transfer path is submitted for below. */
+    struct gex_wgpu_context *ctx = (struct gex_wgpu_context *)pipe;
+    if (ctx->failed)
+       return;
+@@ -28189,8 +28366,11 @@ gex_wgpu_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+           * read back as zeros. */
+          (!flip_y || (!util_format_is_compressed(info->src.format) &&
+                       !util_format_is_compressed(info->dst.format)));
+-      if (transferable && gex_wgpu_blit_by_transfer(pipe, info, flip_y))
+-         return;
++      if (transferable) {
++         gex_wgpu_submit_pending(ctx);
++         if (gex_wgpu_blit_by_transfer(pipe, info, flip_y))
++            return;
++      }
+       /* Reported here, after the transfer path has had its turn, so that a
+        * blit this driver does serve is not announced as a decline.
+        *
+@@ -28230,6 +28410,30 @@ gex_wgpu_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
+       return;
+    }
+ 
++   /* A flipped copy is one CopyTextureToTexture per row, since WebGPU has no
++    * flipping copy -- and a flip is what every blit into a window-system
++    * framebuffer is, its origin being the bottom. Blender composites each
++    * region of its window that way: ~1700 one-row copies a frame, all on the
++    * driver thread, and the main source of its input latency. A colour image
++    * that can be sampled and drawn into is flipped by u_blitter's quad
++    * instead: one draw, whatever the height. */
++   if (flip_y && abs(info->src.box.height) > 1 && ctx->blitter &&
++       info->mask == PIPE_MASK_RGBA &&
++       !util_format_is_depth_or_stencil(info->src.format) &&
++       !util_format_is_compressed(info->src.format) &&
++       !util_format_is_compressed(info->dst.format) &&
++       info->src.box.depth == 1 && info->dst.box.depth == 1 &&
++       gex_resource(info->src.resource)->texture &&
++       gex_resource(info->dst.resource)->texture &&
++       (wgpuTextureGetUsage(gex_resource(info->src.resource)->texture) &
++        WGPUTextureUsage_TextureBinding) &&
++       (wgpuTextureGetUsage(gex_resource(info->dst.resource)->texture) &
++        WGPUTextureUsage_RenderAttachment) &&
++       !gex_wgpu_flip_by_rows()) {
++      gex_wgpu_blit_with_blitter(ctx, info);
++      return;
++   }
++
+    if (!gex_wgpu_copy_texture_region(pipe, info->dst.resource,
+                                      info->dst.level, info->dst.box.x,
+                                      info->dst.box.y, info->dst.box.z,
+@@ -40575,6 +40779,11 @@ gex_wgpu_refresh_persistent_maps(struct gex_wgpu_context *ctx,
+       if (gex_wgpu_persist_log())
+          fprintf(stderr, "PERSIST refresh res=%p size=%u\n",
+                  (void *)resource, size);
++      /* Read-only: nothing to merge with, so the copy can land later. */
++      if (!coherent_only && !(gex->persistent_usage & PIPE_MAP_WRITE) &&
++          gex_wgpu_refresh_begin(ctx, gex, size))
++         continue;
++      gex_wgpu_refresh_finish(gex);
+       if (!gex_wgpu_buffer_readback_locked(&ctx->base, gex, 0, size,
+                                            gex->shadow))
+          continue;
+@@ -40585,10 +40794,111 @@ gex_wgpu_refresh_persistent_maps(struct gex_wgpu_context *ctx,
+    }
+ }
+ 
++/* A persistent mapping the application only reads, brought up to date
++ * without waiting where GL lets it: the barrier that makes the GPU's writes
++ * visible (MemoryBarrier with CLIENT_MAPPED_BUFFER_BARRIER_BIT) starts the
++ * copy and the map, and the shadow is filled when something next looks --
++ * the fence the application waits on (gex_wgpu_fence_finish), a map of the
++ * buffer, or another barrier. Blender reads its shadow statistics this way a
++ * frame after asking, so by then the readback has long finished, where the
++ * barrier itself used to stall the driver thread for it every frame.
++ * GEX_WGPU_SYNC_PERSISTENT_REFRESH=1 waits at the barrier as before. */
++struct gex_wgpu_pending_refresh {
++   WGPUBuffer staging;
++   uint32_t size;
++   struct gex_wgpu_map_state state;
++};
++
++static void
++gex_wgpu_refresh_finish(struct gex_wgpu_resource *gex)
++{
++   struct gex_wgpu_pending_refresh *r = gex->pending_refresh;
++   if (!r)
++      return;
++   gex->pending_refresh = NULL;
++   while (!r->state.done)
++      gex_wgpu_jspi_wait();
++   if (r->state.status == WGPUMapAsyncStatus_Success && gex->shadow &&
++       r->size <= gex->allocation_size)
++      gex_wgpu_read_mapped(r->staging, 0, gex->shadow, r->size);
++   wgpuBufferUnmap(r->staging);
++   gex_wgpu_free_buffer(r->staging);
++   FREE(r);
++}
++
++static bool
++gex_wgpu_refresh_begin(struct gex_wgpu_context *ctx,
++                       struct gex_wgpu_resource *gex, uint32_t size)
++{
++   static int sync = -1;
++   if (sync < 0)
++      sync = GEX_GETENV_ONCE("GEX_WGPU_SYNC_PERSISTENT_REFRESH") ? 1 : 0;
++   if (sync)
++      return false;
++   gex_wgpu_refresh_finish(gex);
++   struct gex_wgpu_screen *screen = gex_screen(ctx->base.screen);
++   struct gex_wgpu_pending_refresh *r = CALLOC_STRUCT(gex_wgpu_pending_refresh);
++   if (!r)
++      return false;
++   gex_wgpu_submit_pending(ctx);
++   WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
++   desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
++   desc.size = size;
++   r->staging = wgpuDeviceCreateBuffer(screen->device, &desc);
++   WGPUCommandEncoder encoder = r->staging ? gex_wgpu_local_encoder(screen) : NULL;
++   if (!encoder) {
++      if (r->staging)
++         gex_wgpu_free_buffer(r->staging);
++      FREE(r);
++      return false;
++   }
++   wgpuCommandEncoderCopyBufferToBuffer(encoder, gex->buffer, 0, r->staging, 0, size);
++   WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
++   if (commands) {
++      gex_wgpu_queue_submit(screen, 1, &commands);
++      wgpuCommandBufferRelease(commands);
++   }
++   gex_wgpu_local_encoder_release(screen, encoder);
++   r->size = size;
++   r->state.status = WGPUMapAsyncStatus_Success;
++   r->state.done = false;
++   WGPUBufferMapCallbackInfo callback = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
++   callback.mode = WGPUCallbackMode_AllowSpontaneous;
++   callback.callback = gex_wgpu_map_callback;
++   callback.userdata1 = &r->state;
++   wgpuBufferMapAsync(r->staging, WGPUMapMode_Read, 0, size, callback);
++   gex->pending_refresh = r;
++   return true;
++}
++
++/* Everything started by gex_wgpu_refresh_begin, finished. */
++static void
++gex_wgpu_refresh_finish_all(struct gex_wgpu_context *ctx)
++{
++   for (unsigned i = 0; i < ctx->persistent_count; ++i)
++      gex_wgpu_refresh_finish(gex_resource(ctx->persistent[i]));
++}
++
+ static void
+ gex_wgpu_track_persistent_map(struct gex_wgpu_context *ctx,
+                               struct pipe_resource *resource, bool add)
+ {
++   struct gex_wgpu_resource *gex = gex_resource(resource);
++   /* Wherever it was tracked, that is the list it leaves -- or, re-mapped
++    * in another context, moves from. */
++   if (gex->persistent_ctx && (!add || gex->persistent_ctx != ctx)) {
++      struct gex_wgpu_context *owner = gex->persistent_ctx;
++      for (unsigned i = 0; i < owner->persistent_count; ++i) {
++         if (owner->persistent[i] != resource)
++            continue;
++         owner->persistent[i] = owner->persistent[owner->persistent_count - 1];
++         owner->persistent[--owner->persistent_count] = NULL;
++         break;
++      }
++      gex->persistent_ctx = NULL;
++   }
++   if (!add)
++      return;
+    for (unsigned i = 0; i < ctx->persistent_count; ++i) {
+       if (ctx->persistent[i] != resource)
+          continue;
+@@ -40622,6 +40932,7 @@ gex_wgpu_track_persistent_map(struct gex_wgpu_context *ctx,
+       ctx->persistent_capacity = want;
+    }
+    ctx->persistent[ctx->persistent_count++] = resource;
++   gex->persistent_ctx = ctx;
+ }
+ 
+ static void
+@@ -40680,6 +40991,15 @@ gex_wgpu_submit_pending_named(struct gex_wgpu_context *ctx, const char *why)
+          break;
+       }
+    }
++   /* Behind the draws, in the same command buffer, so the copy reads what
++    * they wrote. A colour target whose surface reinterprets its format was
++    * rendered into a scratch texture; this is where the bytes go back. */
++   for (unsigned i = 0; i < ctx->color_count; ++i) {
++      if (ctx->colors[i] &&
++          gex_wgpu_color_needs_scratch(ctx->color_formats[i], ctx->colors[i]))
++         gex_wgpu_rt_scratch_copy_into(ctx, ctx->colors[i], ctx->color_layers[i],
++                                       false, ctx->pending_encoder);
++   }
+    WGPUCommandEncoder encoder = ctx->pending_encoder;
+    const unsigned draws = ctx->pending_draws;
+    ctx->pending_encoder = NULL;
+@@ -40711,15 +41031,6 @@ gex_wgpu_submit_pending_named(struct gex_wgpu_context *ctx, const char *why)
+    gex_wgpu_pending_encoder_closed(ctx);
+    gex_wgpu_batched_submits++;
+    gex_wgpu_batched_draws += draws;
+-   /* After the submit, so the copy reads what these draws wrote. A colour
+-    * target whose surface reinterprets its format was rendered into a scratch
+-    * texture; this is where the bytes go back. */
+-   for (unsigned i = 0; i < ctx->color_count; ++i) {
+-      if (ctx->colors[i] &&
+-          gex_wgpu_color_needs_scratch(ctx->color_formats[i], ctx->colors[i]))
+-         gex_wgpu_rt_scratch_copy(ctx, ctx->colors[i], ctx->color_layers[i],
+-                                  false);
+-   }
+ }
+ 
+ /* Dynamic offsets, which WebGPU takes as one array per bind group in
+@@ -41425,6 +41736,163 @@ gex_wgpu_draw_adjacency(struct pipe_context *pipe,
+    return true;
+ }
+ 
++/* Whether an SSA value of a vertex shader is the same for every vertex of a
++ * draw's instance: built only of constants, uniforms, buffers and textures
++ * read at such addresses, and the draw- and instance-level system values.
++ * Conservative: anything not known to be invariant is not. */
++static bool
++gex_wgpu_def_vertex_invariant(nir_def *def, struct hash_table *memo, unsigned depth)
++{
++   if (depth > 64)
++      return false;
++   struct hash_entry *he = _mesa_hash_table_search(memo, def);
++   if (he)
++      return he->data != NULL;
++   bool inv = false;
++   nir_instr *instr = nir_def_instr(def);
++   switch (instr->type) {
++   case nir_instr_type_load_const:
++   case nir_instr_type_undef:
++      inv = true;
++      break;
++   case nir_instr_type_alu: {
++      nir_alu_instr *alu = nir_instr_as_alu(instr);
++      inv = true;
++      for (unsigned i = 0; inv && i < nir_op_infos[alu->op].num_inputs; ++i)
++         inv = gex_wgpu_def_vertex_invariant(alu->src[i].src.ssa, memo, depth + 1);
++      break;
++   }
++   case nir_instr_type_tex: {
++      nir_tex_instr *tex = nir_instr_as_tex(instr);
++      inv = true;
++      for (unsigned i = 0; inv && i < tex->num_srcs; ++i)
++         inv = gex_wgpu_def_vertex_invariant(tex->src[i].src.ssa, memo, depth + 1);
++      break;
++   }
++   case nir_instr_type_deref: {
++      nir_deref_instr *d = nir_instr_as_deref(instr);
++      if (d->deref_type == nir_deref_type_var) {
++         /* Vertex attributes and outputs vary; everything else a vertex
++          * shader can name (uniforms, blocks, images, samplers) does not. */
++         inv = !(d->var->data.mode & (nir_var_shader_in | nir_var_shader_out |
++                                      nir_var_shader_temp | nir_var_function_temp));
++      } else if (d->deref_type == nir_deref_type_cast) {
++         inv = gex_wgpu_def_vertex_invariant(d->parent.ssa, memo, depth + 1);
++      } else {
++         inv = gex_wgpu_def_vertex_invariant(d->parent.ssa, memo, depth + 1) &&
++               (d->deref_type != nir_deref_type_array &&
++                d->deref_type != nir_deref_type_ptr_as_array
++                   ? true
++                   : gex_wgpu_def_vertex_invariant(d->arr.index.ssa, memo, depth + 1));
++      }
++      break;
++   }
++   case nir_instr_type_intrinsic: {
++      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++      switch (intr->intrinsic) {
++      case nir_intrinsic_load_instance_id:
++      case nir_intrinsic_load_base_instance:
++      case nir_intrinsic_load_base_vertex:
++      case nir_intrinsic_load_first_vertex:
++      case nir_intrinsic_load_draw_id:
++      case nir_intrinsic_load_is_indexed_draw:
++      case nir_intrinsic_load_view_index:
++         inv = true;
++         break;
++      case nir_intrinsic_load_deref:
++      case nir_intrinsic_load_ubo:
++      case nir_intrinsic_load_ssbo:
++      case nir_intrinsic_load_uniform:
++      case nir_intrinsic_load_push_constant:
++      case nir_intrinsic_load_constant:
++      case nir_intrinsic_image_deref_load:
++      case nir_intrinsic_image_deref_size:
++      case nir_intrinsic_get_ssbo_size:
++      case nir_intrinsic_deref_buffer_array_length: {
++         inv = true;
++         const unsigned n = nir_intrinsic_infos[intr->intrinsic].num_srcs;
++         for (unsigned i = 0; inv && i < n; ++i)
++            inv = gex_wgpu_def_vertex_invariant(intr->src[i].ssa, memo, depth + 1);
++         break;
++      }
++      default:
++         inv = false;
++         break;
++      }
++      break;
++   }
++   default:
++      inv = false; /* phis and the rest */
++      break;
++   }
++   _mesa_hash_table_insert(memo, def, inv ? (void *)1 : NULL);
++   return inv;
++}
++
++/* The varying locations a vertex shader writes only with vertex-invariant
++ * values, at the top level of its entry point. A flat varying at one of those
++ * reads the same whichever vertex provokes, so GL's last-vertex convention
++ * needs no rewrite for it: Blender's object and material ids are of this
++ * kind, and its draw manager keeps the last-vertex convention and draws
++ * through indirect commands, which the rewrite cannot take natively. */
++static uint64_t
++gex_wgpu_vertex_invariant_outputs(nir_shader *nir)
++{
++   uint64_t written = 0, variant = 0;
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   if (!impl)
++      return 0;
++   struct hash_table *memo = _mesa_pointer_hash_table_create(NULL);
++   nir_foreach_block(block, impl) {
++      const bool top = block->cf_node.parent == &impl->cf_node;
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic != nir_intrinsic_store_deref &&
++             intr->intrinsic != nir_intrinsic_copy_deref)
++            continue;
++         nir_deref_instr *dst = nir_src_as_deref(intr->src[0]);
++         nir_variable *var = dst ? nir_deref_instr_get_variable(dst) : NULL;
++         if (!var || var->data.mode != nir_var_shader_out ||
++             var->data.location < 0 ||
++             var->data.location >= GEX_WGPU_MAX_VARYING_LOCATIONS)
++            continue;
++         const uint64_t bit = BITFIELD64_BIT(var->data.location);
++         written |= bit;
++         bool inv = top && intr->intrinsic == nir_intrinsic_store_deref &&
++                    gex_wgpu_def_vertex_invariant(intr->src[1].ssa, memo, 0);
++         /* Into an array output, at an index that must not vary either. */
++         for (nir_deref_instr *d = dst; inv && d->deref_type != nir_deref_type_var;
++              d = nir_deref_instr_parent(d)) {
++            if (d->deref_type == nir_deref_type_array ||
++                d->deref_type == nir_deref_type_ptr_as_array)
++               inv = gex_wgpu_def_vertex_invariant(d->arr.index.ssa, memo, 0);
++            else if (d->deref_type != nir_deref_type_struct)
++               inv = false;
++         }
++         if (!inv)
++            variant |= bit;
++      }
++   }
++   _mesa_hash_table_destroy(memo, NULL);
++   return written & ~variant;
++}
++
++/* Whether the bound shaders have a flat varying the provoking vertex
++ * convention changes. */
++static bool
++gex_wgpu_flat_needs_provoking(const struct gex_wgpu_shader *fs,
++                              const struct gex_wgpu_shader *vs)
++{
++   for (unsigned i = 0; i < GEX_WGPU_MAX_VARYING_LOCATIONS; ++i)
++      if ((fs->varying_interp_mask & BITFIELD64_BIT(i)) &&
++          fs->varying_interp[i] == INTERP_MODE_FLAT &&
++          !(vs && (vs->vertex_invariant_outputs & BITFIELD64_BIT(i))))
++         return true;
++   return false;
++}
++
+ /* Whether any of a shader's inputs is flat-interpolated, which is what makes
+  * the provoking vertex observable. */
+ static bool
+@@ -43325,6 +43793,7 @@ gex_wgpu_draw_vbo(struct pipe_context *pipe,
+     * is recorded yet at the outermost entry, so it is safe here. The serial
+     * check inside makes it free for a source nothing has written. */
+    if (ctx->draw_depth == 0) {
++      ctx->refresh_into_pending = true;
+       for (unsigned i = 0; i < GEX_WGPU_MAX_SAMPLERS; ++i) {
+          gex_wgpu_sampler_view_refresh(
+             pipe, (struct gex_wgpu_sampler_view *)ctx->sampler_views[i]);
+@@ -43332,6 +43801,7 @@ gex_wgpu_draw_vbo(struct pipe_context *pipe,
+             pipe,
+             (struct gex_wgpu_sampler_view *)ctx->vertex_sampler_views[i]);
+       }
++      ctx->refresh_into_pending = false;
+    }
+ 
+    /* Bisection over a frame's draws; see gex_wgpu_frame_draw. Counted only at
+@@ -43838,6 +44308,176 @@ gex_wgpu_draw_quads_indirect(struct gex_wgpu_context *ctx,
+    return true;
+ }
+ 
++/* ARB_draw_indirect, natively.
++ *
++ * util_draw_indirect resolves a command on the CPU by mapping its buffer,
++ * which in a browser is a GPU readback the driver thread has to suspend for:
++ * Blender's draw manager draws everything through indirect commands its
++ * culling shader writes, a dozen a frame, and those waits were most of its
++ * frame time. WebGPU's drawIndirect and drawIndexedIndirect take GL's command
++ * layouts field for field, so the command is copied, on the GPU, into a
++ * scratch buffer of the driver's -- firstInstance left zero, because this
++ * driver keeps gl_InstanceID at zero by moving the base instance onto the
++ * instance-stepped buffers instead, which it cannot do for a base it does not
++ * know -- and the draw parameters a shader reads (gl_BaseVertex,
++ * gl_BaseInstance, the first vertex) are copied out of the command into the
++ * draw's slot of the constant ring the same way. The copies are encoder
++ * commands, so each such draw begins its render pass anew.
++ *
++ * Only for draws that no rewrite in the draw path needs to see the counts of:
++ * those still go through util_draw_indirect. GEX_WGPU_NO_NATIVE_INDIRECT=1
++ * sends every one there; GEX_WGPU_NATIVE_INDIRECT_LOG=1 says why one went. */
++static const char *
++gex_wgpu_native_indirect_refusal(struct gex_wgpu_context *ctx,
++                                 const struct pipe_draw_info *info,
++                                 const struct pipe_draw_indirect_info *indirect)
++{
++   static int off = -1;
++   if (off < 0)
++      off = GEX_GETENV_ONCE("GEX_WGPU_NO_NATIVE_INDIRECT") ? 1 : 0;
++   if (off)
++      return "disabled";
++   if (indirect->count_from_stream_output || indirect->indirect_draw_count)
++      return "count from a buffer";
++   if (!indirect->buffer || (indirect->offset & 3) ||
++       (indirect->draw_count > 1 && (indirect->stride & 3)))
++      return "argument buffer";
++   if (!ctx->vs || !ctx->rasterizer)
++      return "no state";
++   if (!(GEX_WGPU_PRIM_MODES & BITFIELD_BIT(info->mode)))
++      return "topology";
++   const enum mesa_prim reduced = u_reduced_prim(info->mode);
++   if (reduced == MESA_PRIM_POINTS)
++      return "points";
++   if (info->index_size && info->index_size != 2 && info->index_size != 4)
++      return "index size";
++   if (info->index_size && info->has_user_indices)
++      return "client indices";
++   if (info->primitive_restart) {
++      /* WebGPU restarts strips, and only strips, at the all-ones index. */
++      const bool strip = info->mode == MESA_PRIM_TRIANGLE_STRIP ||
++                         info->mode == MESA_PRIM_LINE_STRIP;
++      const unsigned all_ones = info->index_size == 2 ? 0xffffu : 0xffffffffu;
++      if (!info->index_size || !strip || info->restart_index != all_ones)
++         return "primitive restart";
++   }
++   if (ctx->gs || ctx->tcs || ctx->tes || ctx->so_target_count)
++      return "geometry, tessellation or transform feedback";
++   if (ctx->vs->cull_distances)
++      return "cull distances";
++   if (ctx->fs && ctx->fs->fb_fetch &&
++       gex_screen(ctx->base.screen)->software_framebuffer_fetch)
++      return "framebuffer fetch";
++   if (ctx->fs && ctx->fs->reads_primitive_id)
++      return "primitive id";
++   const struct gex_wgpu_rasterizer *r = ctx->rasterizer;
++   if (reduced == MESA_PRIM_TRIANGLES &&
++       (r->fill_front != r->fill_back || r->fill_mode != PIPE_POLYGON_MODE_FILL))
++      return "polygon mode";
++   if (r->cull_face == PIPE_FACE_FRONT_AND_BACK)
++      return "culling both faces";
++   if (reduced == MESA_PRIM_LINES &&
++       (r->line_width > 1.0f || r->line_smooth || r->line_stipple))
++      return "line rasterization";
++   if (!r->flatshade_first && ctx->fs && gex_wgpu_flat_needs_provoking(ctx->fs, ctx->vs))
++      return "last provoking vertex";
++   if (ctx->vertex_elements)
++      for (unsigned i = 0; i < ctx->vertex_elements->count; ++i)
++         if (ctx->vertex_elements->elements[i].instance_divisor)
++            return "instanced attributes";
++   return NULL;
++}
++
++static bool
++gex_wgpu_draw_native_indirect(struct pipe_context *pipe,
++                              const struct pipe_draw_info *info,
++                              unsigned drawid_offset,
++                              const struct pipe_draw_indirect_info *indirect)
++{
++   struct gex_wgpu_context *ctx = (struct gex_wgpu_context *)pipe;
++   const char *why = gex_wgpu_native_indirect_refusal(ctx, info, indirect);
++   if (why) {
++      if (GEX_GETENV_ONCE("GEX_WGPU_NATIVE_INDIRECT_LOG"))
++         fprintf(stderr, "gex-wgpu: indirect draw resolved on the CPU: %s\n", why);
++      return false;
++   }
++   if (!ctx->indirect_scratch) {
++      WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
++      desc.size = GEX_WGPU_INDIRECT_SCRATCH_BYTES;
++      desc.usage = WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst;
++      ctx->indirect_scratch =
++         wgpuDeviceCreateBuffer(gex_screen(pipe->screen)->device, &desc);
++      if (!ctx->indirect_scratch)
++         return false;
++   }
++   /* A placeholder direct draw, so that everything the draw path decides
++    * from a draw's shape it decides here too. Its counts reach nothing but
++    * the bounds diagnostic: the emitted draw is the indirect one. */
++   struct pipe_draw_info direct = *info;
++   direct.instance_count = 1;
++   direct.start_instance = 0;
++   direct.index_bounds_valid = false;
++   direct.min_index = 0;
++   direct.max_index = ~0u;
++   direct.primitive_restart = false; /* WebGPU's own, for the strips allowed */
++   const struct pipe_draw_start_count_bias placeholder = { .start = 0, .count = 3 };
++   const unsigned stride = indirect->draw_count > 1 ? indirect->stride : 0;
++   const unsigned saved_resolve_at = ctx->indirect_resolve_at;
++   ctx->indirect_resolve_at = ctx->draw_depth;
++   for (unsigned i = 0; i < indirect->draw_count && !ctx->failed; ++i) {
++      ctx->native_indirect.active = true;
++      ctx->native_indirect.buffer = indirect->buffer;
++      ctx->native_indirect.offset = indirect->offset + i * stride;
++      ctx->native_indirect.draw_params_offset = ~0u;
++      gex_wgpu_batch_touch(ctx, indirect->buffer);
++      gex_wgpu_draw_vbo(pipe, &direct,
++                        info->increment_draw_id ? drawid_offset + i : drawid_offset,
++                        NULL, &placeholder, 1);
++      ctx->native_indirect.active = false;
++   }
++   ctx->indirect_resolve_at = saved_resolve_at;
++   return true;
++}
++
++/* Before the pass a native indirect draw is recorded in begins: its command,
++ * and the draw parameters out of it, copied where the draw reads them.
++ * Returns the scratch offset of the copied command. */
++static uint64_t
++gex_wgpu_native_indirect_copies(struct gex_wgpu_context *ctx,
++                                WGPUCommandEncoder encoder, bool indexed)
++{
++   WGPUBuffer src = gex_resource(ctx->native_indirect.buffer)->buffer;
++   const uint64_t at = ctx->native_indirect.offset;
++   /* Arrays commands in the first half, indexed in the second: the
++    * firstInstance word of each is never written, so stays the zero the
++    * buffer was created with (an indexed command's baseVertex sits where an
++    * arrays command's firstInstance would). */
++   const unsigned half = GEX_WGPU_INDIRECT_SCRATCH_BYTES / 2;
++   const uint64_t slot = (indexed ? half : 0) + ctx->indirect_scratch_next;
++   ctx->indirect_scratch_next = (ctx->indirect_scratch_next + 32) % half;
++   /* count, instanceCount, first(Index) [, baseVertex] */
++   wgpuCommandEncoderCopyBufferToBuffer(encoder, src, at, ctx->indirect_scratch,
++                                        slot, indexed ? 16 : 12);
++   const unsigned dp = ctx->native_indirect.draw_params_offset;
++   if (dp != ~0u && ctx->constant_ring) {
++      WGPUBuffer ring = gex_resource(ctx->constant_ring)->buffer;
++      if (indexed) {
++         /* baseVertex, baseInstance -> words 0, 1; baseVertex -> first vertex */
++         wgpuCommandEncoderCopyBufferToBuffer(
++            encoder, src, at + 12, ring, dp + 4 * GEX_WGPU_DRAW_PARAM_BASE_VERTEX, 8);
++         wgpuCommandEncoderCopyBufferToBuffer(
++            encoder, src, at + 12, ring, dp + 4 * GEX_WGPU_DRAW_PARAM_FIRST_VERTEX, 4);
++      } else {
++         /* baseInstance; first -> first vertex (gl_BaseVertex stays 0) */
++         wgpuCommandEncoderCopyBufferToBuffer(
++            encoder, src, at + 12, ring, dp + 4 * GEX_WGPU_DRAW_PARAM_BASE_INSTANCE, 4);
++         wgpuCommandEncoderCopyBufferToBuffer(
++            encoder, src, at + 8, ring, dp + 4 * GEX_WGPU_DRAW_PARAM_FIRST_VERTEX, 4);
++      }
++   }
++   return slot;
++}
++
+ /* `gex_draws_at_entry` is a local of draw_vbo_inner, which is the only
+  * function this macro is used in. */
+ #define GEX_DRAW_DROP()                                                       \
+@@ -43859,6 +44499,34 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+    struct gex_wgpu_context *ctx = (struct gex_wgpu_context *)pipe;
+    /* What GEX_DRAW_DROP compares against to tell a handoff from a real drop. */
+    const uint64_t gex_draws_at_entry = gex_wgpu_draws_recorded;
++   /* Primitive restart at the all-ones index needs nothing of this driver
++    * where WebGPU's own behaviour is the same: strips restart there natively,
++    * and in a triangle list a triangle whose three indices are all restarts
++    * -- how an application drops a primitive from a list, Blender for every
++    * hidden face -- fetches one vertex three times and is degenerate, and so
++    * is a line whose two indices are (zero length: no fragments). Without
++    * this, every indexed draw of an application that enables
++    * GL_PRIMITIVE_RESTART_FIXED_INDEX for good went through the CPU split,
++    * which scans its whole index buffer, and no indirect draw of one could be
++    * taken natively. A restart that cuts a list triangle short is drawn
++    * differently (GEX_WGPU_LIST_RESTART_EXACT=1 keeps the exact path), and
++    * points, whose dropped primitives would show, keep it. */
++   struct pipe_draw_info restart_native;
++   if (info && info->primitive_restart &&
++       (info->index_size == 2 || info->index_size == 4) &&
++       info->restart_index == (info->index_size == 2 ? 0xffffu : 0xffffffffu)) {
++      static int exact = -1;
++      if (exact < 0)
++         exact = GEX_GETENV_ONCE("GEX_WGPU_LIST_RESTART_EXACT") ? 1 : 0;
++      const bool strip = info->mode == MESA_PRIM_TRIANGLE_STRIP ||
++                         info->mode == MESA_PRIM_LINE_STRIP;
++      if (strip || (!exact && (info->mode == MESA_PRIM_TRIANGLES ||
++                               info->mode == MESA_PRIM_LINES))) {
++         restart_native = *info;
++         restart_native.primitive_restart = false;
++         info = &restart_native;
++      }
++   }
+    /* The whole call, so that the pipeline and submit figures below can be
+     * read as fractions of the driver's own cost rather than of wall clock,
+     * which also contains the application and the frame readback. */
+@@ -44011,7 +44679,7 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+        !ctx->rasterizer->flatshade_first && !unfilled_draw_pending &&
+        !downstream_primitives &&
+        u_reduced_prim(info->mode) != MESA_PRIM_POINTS &&
+-       gex_wgpu_shader_has_flat_varying(ctx->fs)) {
++       gex_wgpu_flat_needs_provoking(ctx->fs, ctx->vs)) {
+       /* The rewrite re-issues this draw as an indexed *list*, and a list has
+        * more vertices than the strip or fan it came from -- six against four
+        * for a two-triangle strip. Invisible for an ordinary shader, and
+@@ -44507,6 +45175,9 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+                            1);
+       GEX_DRAW_DROP();
+    }
++   if (indirect && info && !ctx->failed &&
++       gex_wgpu_draw_native_indirect(pipe, info, drawid_offset, indirect))
++      GEX_DRAW_DROP();
+    if (indirect && info && !ctx->failed) {
+       /* The reissued commands land one level down and carry their own draw
+        * parameters; see own_draw_params. Saved and restored so a nested
+@@ -46343,6 +47014,8 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+                  info->index_size, draws[0].index_bias, draws[0].start);
+       draw_params_offset =
+          gex_wgpu_stage_ring_words(ctx, words, GEX_WGPU_DRAW_PARAM_WORDS);
++      if (ctx->native_indirect.active)
++         ctx->native_indirect.draw_params_offset = draw_params_offset;
+       if (draw_params_offset == ~0u) {
+          if (!ctx->failed)
+             fprintf(stderr, "gex-wgpu: could not stage the draw parameters\n");
+@@ -47428,6 +48101,7 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+    const bool counting_now =
+       ctx->active_queries[GEX_WGPU_QUERY_OCCLUSION][0] && ctx->occlusion_set;
+    const bool reuse = !counting_now && ctx->pending_pass &&
++      !ctx->native_indirect.active &&
+       memcmp(&ctx->pending_pass_key, &wanted_pass, sizeof(wanted_pass)) == 0;
+    WGPUTextureView views[GEX_WGPU_MAX_COLOR_TARGETS] = {0};
+    /* Which targets ended up attached through their scratch texture, which the
+@@ -48395,6 +49069,7 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+          wgpuRenderPipelineAddRef(odd_pipeline);
+    }
+    WGPURenderPassEncoder pass = NULL;
++   uint64_t native_indirect_slot = 0;
+    for (uint64_t ordered = 0; ordered < ordered_draws; ++ordered) {
+       const uint32_t ordered_primitive = serial_fetch ? ordered % ordered_primitives : 0;
+       const uint32_t ordered_instance = serial_fetch ? ordered / ordered_primitives : 0;
+@@ -48417,6 +49092,9 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+        * occlusion query index belongs to the pass. */
+       if (!reuse || serial_fetch) {
+          gex_wgpu_end_pass(ctx);
++         if (ctx->native_indirect.active)
++            native_indirect_slot = gex_wgpu_native_indirect_copies(
++               ctx, encoder, info->index_size != 0);
+          gex_wgpu_cmd_note("BEGIN-PASS");
+          ctx->pending_pass =
+             wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+@@ -48737,6 +49415,10 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+             /* Instance zero: the base has been folded into the
+              * instance-stepped buffers' offsets above, and passing it here as
+              * well would both double it and shift gl_InstanceID. */
++            if (ctx->native_indirect.active)
++               wgpuRenderPassEncoderDrawIndexedIndirect(pass, ctx->indirect_scratch,
++                                                        native_indirect_slot);
++            else
+             wgpuRenderPassEncoderDrawIndexed(
+                pass, serial_fetch ? primitive_size : draws[0].count,
+                serial_fetch ? 1 : info->instance_count,
+@@ -48744,7 +49426,7 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+                draws[0].index_bias, serial_fetch ? ordered_instance : 0u);
+             /* Not per primitive: ordered framebuffer fetch draws one at a
+              * time and has nothing to repeat. */
+-            if (!serial_fetch &&
++            if (!serial_fetch && !ctx->native_indirect.active &&
+                 gex_wgpu_repeat_ok(ctx, info, &draws[0], index_resource,
+                                    uploaded_index_resource != NULL, first_index,
+                                    draw_params_offset != ~0u, counting,
+@@ -48786,6 +49468,10 @@ gex_wgpu_draw_vbo_inner(struct pipe_context *pipe,
+             gex_wgpu_cmd_note("draw count=%u inst=%u first=%u", vertices,
+                               instances, first_vertex);
+             gex_wgpu_cmd_end();
++            if (ctx->native_indirect.active)
++               wgpuRenderPassEncoderDrawIndirect(pass, ctx->indirect_scratch,
++                                                 native_indirect_slot);
++            else
+             wgpuRenderPassEncoderDraw(pass, serial_fetch ? primitive_size : vertices,
+                                       serial_fetch ? 1 : instances,
+                                       first_vertex + (serial_fetch ? ordered_primitive * primitive_step : 0),
+@@ -49019,8 +49705,10 @@ gex_wgpu_flush(struct pipe_context *pipe, struct pipe_fence_handle **fence,
+       nothing. */
+    gex_wgpu_refresh_persistent_maps(ctx, true);
+    (void)flags;
++   /* Not NULL, which reads as signalled without ever reaching fence_finish,
++    * where refreshes started by a barrier are completed. */
+    if (fence)
+-      *fence = NULL;
++      *fence = gex_wgpu_fence_sentinel;
+ }
+ 
+ static void
+@@ -49028,6 +49716,8 @@ gex_wgpu_context_destroy(struct pipe_context *pipe)
+ {
+    gex_wgpu_submit_pending((struct gex_wgpu_context *)pipe);
+    struct gex_wgpu_context *ctx = (struct gex_wgpu_context *)pipe;
++   for (unsigned i = 0; i < ctx->persistent_count; ++i)
++      gex_resource(ctx->persistent[i])->persistent_ctx = NULL;
+    free(ctx->persistent);
+    for (unsigned rt = 0; rt < 8; ++rt) {
+       if (ctx->fetch_views[rt])
+@@ -49366,10 +50056,15 @@ gex_wgpu_fence_finish(struct pipe_screen *screen, struct pipe_context *ctx,
+                       struct pipe_fence_handle *fence, uint64_t timeout)
+ {
+    (void)screen;
+-   (void)ctx;
+    (void)timeout;
+-   /* A NULL fence is already signalled by construction. */
+-   return fence == NULL;
++   /* Every submission is on the one queue and every readback waits on it, so
++    * the only thing a fence still has to wait for is a persistent mapping's
++    * refresh (gex_wgpu_refresh_begin). */
++   if (fence == gex_wgpu_fence_sentinel && ctx) {
++      GEX_DEVICE_GUARD(gex_screen(screen));
++      gex_wgpu_refresh_finish_all((struct gex_wgpu_context *)ctx);
++   }
++   return true;
+ }
+ 
+ static void
+diff --git a/src/gallium/targets/wink-wasm/library_wink.js b/src/gallium/targets/wink-wasm/library_wink.js
+index f4cec61..dff28e2 100644
+--- a/src/gallium/targets/wink-wasm/library_wink.js
++++ b/src/gallium/targets/wink-wasm/library_wink.js
+@@ -359,6 +359,16 @@ var LibraryWink = {
+       setTimeout(done, 1000);
+     }));
+   },
++  wink_js_signal_after_frames__deps: ['wink_signal_fence'],
++  wink_js_signal_after_frames: function (fence, frames) {
++    var left = frames;
++    var settled = false;
++    var done = function () { if (!settled) { settled = true; _wink_signal_fence(fence); } };
++    var tick = function () { if (--left <= 0) done(); else requestAnimationFrame(tick); };
++    if (left > 0 && typeof requestAnimationFrame == 'function') requestAnimationFrame(tick);
++    else setTimeout(done, 0);
++    setTimeout(done, 1000);
++  },
+   wink_js_yield_frame__postset:
+     "if (typeof WebAssembly.Suspending == 'function') _wink_js_yield_frame = new WebAssembly.Suspending(_wink_js_yield_frame);",
+ };
+diff --git a/src/gallium/targets/wink-wasm/wink.c b/src/gallium/targets/wink-wasm/wink.c
+index 9260d9a..2220b11 100644
+--- a/src/gallium/targets/wink-wasm/wink.c
++++ b/src/gallium/targets/wink-wasm/wink.c
+@@ -46,6 +46,7 @@
+ #include "util/u_inlines.h"
+ #include "util/u_queue.h"
+ #include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "gex_wgpu_public.h"
+ 
+ #ifdef __EMSCRIPTEN__
+@@ -728,6 +729,11 @@ wink_surface_destroy(wink_surface *s)
+    if (tls_draw == s || tls_read == s)
+       wink_make_current(tls_current, tls_draw == s ? NULL : tls_draw,
+                         tls_read == s ? NULL : tls_read);
++#if MESA_GLTHREAD_REMOTE
++   /* Remote: binds are queued (wink_make_current); let this thread's run. */
++   if (wink.remote && tls_current)
++      _mesa_glthread_finish(tls_current->st->ctx);
++#endif
+    /* Remote: nothing may still be presenting it. */
+    util_queue_fence_wait(&s->swap_fence[0]);
+    util_queue_fence_wait(&s->swap_fence[1]);
+@@ -974,6 +980,11 @@ static void
+ context_destroy_rpc(void *p)
+ {
+    wink_context *c = p;
++#if MESA_GLTHREAD_REMOTE
++   /* What other threads queued for it before releasing it (binds included). */
++   if (wink.remote)
++      _mesa_glthread_finish(c->st->ctx);
++#endif
+    st_destroy_context(c->st);
+    free(c);
+ }
+@@ -1017,6 +1028,41 @@ make_current_rpc(void *p)
+                                  rpc->read ? &rpc->read->base : NULL);
+ }
+ 
++#if MESA_GLTHREAD_REMOTE
++/* Remote make-current, queued instead of waited for. An application that
++ * switches contexts every frame (Blender draws each viewport in a context of
++ * its own and composites it in the window's) would otherwise drain the whole
++ * pipeline through the main thread twice a frame. The bind runs on the main
++ * thread in the new context's queue, in order with its GL; what the thread
++ * recorded in its previous context runs first, so work drawn there is done
++ * before the new context reads it, as an implicit flush between contexts on
++ * one thread would order it. */
++struct make_current_async {
++   wink_context *old, *c;
++   wink_surface *draw, *read;
++};
++
++static void
++make_current_glthread(struct gl_context *ctx, void *p)
++{
++   struct make_current_async *m = p;
++   (void)ctx;
++   if (m->old && m->old != m->c) {
++      _mesa_glthread_finish(m->old->st->ctx);
++      /* And submitted: each context records into its own command encoder,
++       * and the context bound here last may be another thread's, so the
++       * implicit flush st_api_make_current gives the context it replaces
++       * would not reach this one. A viewport drawn in one context and
++       * composited in the next read the texture before its last draws --
++       * Blender lost its viewport text and navigation gizmo to that. */
++      st_context_flush(m->old->st, 0, NULL, NULL, NULL);
++   }
++   st_api_make_current(m->c->st, m->draw ? &m->draw->base : NULL,
++                       m->read ? &m->read->base : NULL);
++   free(m);
++}
++#endif
++
+ int
+ wink_make_current(wink_context *c, wink_surface *draw, wink_surface *read)
+ {
+@@ -1026,6 +1072,33 @@ wink_make_current(wink_context *c, wink_surface *draw, wink_surface *read)
+    if (!c && (draw || read))
+       return WINK_ERROR_BAD_CONTEXT;
+ 
++#if MESA_GLTHREAD_REMOTE
++   static int async_bind = -1;
++   if (async_bind < 0)
++      async_bind = debug_get_bool_option("WINK_ASYNC_MAKE_CURRENT", true);
++   if (wink.remote && async_bind) {
++      wink_context *old = tls_current;
++      if (old)
++         _mesa_glthread_flush_batch(old->st->ctx);
++      if (c && (old != c || tls_draw != draw || tls_read != read)) {
++         struct make_current_async *m = malloc(sizeof(*m));
++         if (!m)
++            return WINK_ERROR_OUT_OF_MEMORY;
++         *m = (struct make_current_async){ old, c, draw, read };
++         _mesa_glthread_call_async(c->st->ctx, make_current_glthread, m, NULL);
++      }
++      /* Releasing leaves the main thread's binding as it is: the next bind
++       * replaces it, and destroying a context or surface unbinds it there. */
++      struct gl_context *ctx = c ? c->st->ctx : NULL;
++      _mesa_glapi_set_context(ctx);
++      _mesa_glapi_set_dispatch(ctx ? ctx->MarshalExec : NULL);
++      tls_current = c;
++      tls_draw = c ? draw : NULL;
++      tls_read = c ? read : NULL;
++      return WINK_OK;
++   }
++#endif
++
+ #if MESA_GLTHREAD_REMOTE
+    /* Whatever this thread recorded for the old context goes first. */
+    if (wink.remote && tls_current)
+@@ -1240,15 +1313,31 @@ swap_rpc(void *p)
+ 
+ #if MESA_GLTHREAD_REMOTE
+ /* A remote swap, run on the main thread after the frame's batches. The
+- * runner must give the event loop a turn for the frame to be presented, and
+- * waiting for the next animation frame is also the pacing. */
++ * frame reaches the canvas when the runner next yields, and the pacing is the
++ * swap's fence, which library_wink.js signals on the next animation frame:
++ * the runner does not wait for it, so it goes on to the next frame's GL
++ * while the display catches up, and the application thread, which waits for
++ * the fence of the frame before, stays at most one frame ahead. */
++struct swap_job {
++   wink_surface *s;
++   struct util_queue_fence *fence;
++};
++
+ static void
+ swap_glthread(struct gl_context *ctx, void *p)
+ {
+    (void)ctx;
+-   wink_surface *s = p;
+-   swap_here(s);
+-   wink_js_yield_frame(s->swap_interval > 0 ? s->swap_interval : 0);
++   struct swap_job *j = p;
++   swap_here(j->s);
++   wink_js_signal_after_frames(j->fence, j->s->swap_interval > 0 ? j->s->swap_interval : 0);
++   free(j);
++}
++
++/* library_wink.js, on the main thread, when a swap's frames have passed. */
++EMSCRIPTEN_KEEPALIVE void
++wink_signal_fence(struct util_queue_fence *fence)
++{
++   util_queue_fence_signal(fence);
+ }
+ #endif
+ 
+@@ -1269,8 +1358,13 @@ wink_swap_buffers(wink_surface *s)
+       s->swap_index ^= 1;
+       static uint64_t swap_wait_ns;
+       util_queue_fence_wait(&s->swap_fence[i]);
+-      _mesa_glthread_call_async(tls_current->st->ctx, swap_glthread, s,
+-                                &s->swap_fence[i]);
++      struct swap_job *j = malloc(sizeof(*j));
++      if (!j)
++         return WINK_ERROR_OUT_OF_MEMORY;
++      j->s = s;
++      j->fence = &s->swap_fence[i];
++      util_queue_fence_reset(j->fence);
++      _mesa_glthread_call_async(tls_current->st->ctx, swap_glthread, j, NULL);
+       const int64_t t1 = os_time_get_nano();
+       util_queue_fence_wait(&s->swap_fence[i ^ 1]);
+       swap_wait_ns += (uint64_t)(os_time_get_nano() - t1);
+diff --git a/src/gallium/targets/wink-wasm/wink_native.c b/src/gallium/targets/wink-wasm/wink_native.c
+index a777275..25783b1 100644
+--- a/src/gallium/targets/wink-wasm/wink_native.c
++++ b/src/gallium/targets/wink-wasm/wink_native.c
+@@ -7,6 +7,7 @@
+  * Nothing suspends: native Dawn waits for itself.
+  */
+ #include "wink_private.h"
++#include "util/u_queue.h"
+ 
+ #include <webgpu/webgpu.h>
+ #include <stddef.h>
+@@ -59,6 +60,13 @@ wink_js_yield_frame(int frames)
+    (void)frames;
+ }
+ 
++void
++wink_js_signal_after_frames(struct util_queue_fence *fence, int frames)
++{
++   (void)frames;
++   util_queue_fence_signal(fence);
++}
++
+ void *
+ wink_native_create_surface(void *layer)
+ {
+diff --git a/src/gallium/targets/wink-wasm/wink_private.h b/src/gallium/targets/wink-wasm/wink_private.h
+index ca451da..8547aaf 100644
+--- a/src/gallium/targets/wink-wasm/wink_private.h
++++ b/src/gallium/targets/wink-wasm/wink_private.h
+@@ -24,6 +24,11 @@ void wink_js_kick(struct util_queue *queue);
+  * turn -- which is when a canvas is presented. Suspends: on the main thread's
+  * runner, or on a thread entered through WebAssembly.promising. */
+ void wink_js_yield_frame(int frames);
++/* Main thread: call wink_signal_fence(fence) once `frames` animation frames
++ * (or, for 0, one turn of the event loop) have passed. Never suspends. */
++struct util_queue_fence;
++void wink_js_signal_after_frames(struct util_queue_fence *fence, int frames);
++void wink_signal_fence(struct util_queue_fence *fence);
+ 
+ /* wink_native.c: a surface of a native layer (a CAMetalLayer), or NULL. */
+ void *wink_native_create_surface(void *layer);                  /* WGPUSurface */
+diff --git a/src/mesa/glapi/glapi/gen/marshal_generated_c.py b/src/mesa/glapi/glapi/gen/marshal_generated_c.py
+index b35510b..59fc549 100644
+--- a/src/mesa/glapi/glapi/gen/marshal_generated_c.py
++++ b/src/mesa/glapi/glapi/gen/marshal_generated_c.py
+@@ -100,9 +100,6 @@ class PrintCode(gl_XML.gl_print_base):
+         with indent():
+             # A client-memory image upload is sent along as a copy when it can
+             # be (glthread.c); only what that cannot take waits.
+-            if func.name in ('TexImage2D', 'TexSubImage2D'):
+-                out('if (_mesa_glthread_remote_{0}(ctx, {1}))'.format(func.name, args))
+-                out('   return;')
+             # Named for _mesa_glthread_remote_census: every wait is one round
+             # trip through the driver thread, and which calls make them is the
+             # question the census answers -- by pname where there is one.
+@@ -121,6 +118,36 @@ class PrintCode(gl_XML.gl_print_base):
+         out('}')
+         out('#endif')
+ 
++    # Calls a remote context can answer or queue without a round trip to the
++    # driver thread, tried first whatever the marshal flavor (glthread.c).
++    # _mesa_glthread_remote_<F>(ctx, args...[, &ret]) returns true if it took
++    # the call.
++    REMOTE_HOOKS = ('TexImage1D', 'TexImage2D', 'TexImage3D', 'TexSubImage2D',
++                    'TextureSubImage2D', 'GenTextures', 'GenBuffers',
++                    'GenVertexArrays', 'MapBufferRange', 'MapNamedBufferRange',
++                    'FlushMappedBufferRange', 'FlushMappedNamedBufferRange',
++                    'UnmapBuffer', 'UnmapNamedBufferEXT', 'ClearBufferData',
++                    'ClearNamedBufferData', 'ClearBufferSubData',
++                    'ClearNamedBufferSubData', 'GetTexLevelParameteriv',
++                    'FenceSync')
++
++    def print_remote_hook(self, func):
++        if func.name not in self.REMOTE_HOOKS:
++            return
++        args = func.get_called_parameter_string()
++        out('#if MESA_GLTHREAD_REMOTE')
++        out('if (unlikely(ctx->GLThread.remote)) {')
++        with indent():
++            if func.return_type == 'void':
++                out('if (_mesa_glthread_remote_{0}(ctx, {1}))'.format(func.name, args))
++                out('   return;')
++            else:
++                out('{0} remote_ret;'.format(func.return_type))
++                out('if (_mesa_glthread_remote_{0}(ctx, {1}, &remote_ret))'.format(func.name, args))
++                out('   return remote_ret;')
++        out('}')
++        out('#endif')
++
+     def print_remote_helper(self, func):
+         params = [p for p in func.parameterIterator() if not p.is_padding]
+         void = func.return_type == 'void'
+@@ -173,6 +200,7 @@ class PrintCode(gl_XML.gl_print_base):
+             out('GET_CURRENT_CONTEXT(ctx);')
+             if func.marshal_call_before:
+                 out(func.marshal_call_before);
++            self.print_remote_hook(func)
+             self.print_remote_call(func)
+             out('_mesa_glthread_finish_before(ctx, "{0}");'.format(func.name))
+             self.print_call(func)
+@@ -350,6 +378,7 @@ class PrintCode(gl_XML.gl_print_base):
+             out('GET_CURRENT_CONTEXT(ctx);')
+             if func.marshal_call_before:
+                 out(func.marshal_call_before);
++            self.print_remote_hook(func)
+ 
+             if func.packed_fixed_params:
+                 if func.packed_param_size > 0:
+diff --git a/src/mesa/main/bufferobj.c b/src/mesa/main/bufferobj.c
+index 51a3382..6136243 100644
+--- a/src/mesa/main/bufferobj.c
++++ b/src/mesa/main/bufferobj.c
+@@ -2013,6 +2013,23 @@ create_buffers(struct gl_context *ctx, GLsizei n, GLuint *buffers, bool dsa)
+ }
+ 
+ 
++/**
++ * glGenBuffers for a remote glthread context's application thread
++ * (glthread_remote.c): reserve names with the placeholder object glGenBuffers
++ * inserts, under the table's mutex -- never the driver thread's
++ * BufferObjectsLocked, which belongs to that thread.
++ */
++void
++_mesa_reserve_buffer_names(struct gl_context *ctx, GLsizei n, GLuint *buffers)
++{
++   _mesa_HashLockMutex(&ctx->Shared->BufferObjects);
++   _mesa_HashFindFreeKeys(&ctx->Shared->BufferObjects, buffers, n);
++   for (GLsizei i = 0; i < n; i++)
++      _mesa_HashInsertLocked(&ctx->Shared->BufferObjects, buffers[i],
++                             &DummyBufferObject);
++   _mesa_HashUnlockMutex(&ctx->Shared->BufferObjects);
++}
++
+ static void
+ create_buffers_err(struct gl_context *ctx, GLsizei n, GLuint *buffers, bool dsa)
+ {
+diff --git a/src/mesa/main/bufferobj.h b/src/mesa/main/bufferobj.h
+index 5277ee1..aa7bd9e 100644
+--- a/src/mesa/main/bufferobj.h
++++ b/src/mesa/main/bufferobj.h
+@@ -229,4 +229,7 @@ _mesa_ClearBufferSubData_sw(struct gl_context *ctx,
+                             GLsizeiptr clearValueSize,
+                             struct gl_buffer_object *bufObj);
+ 
++void
++_mesa_reserve_buffer_names(struct gl_context *ctx, GLsizei n, GLuint *buffers);
++
+ #endif
+diff --git a/src/mesa/main/glthread.c b/src/mesa/main/glthread.c
+index 3801382..f9e4681 100644
+--- a/src/mesa/main/glthread.c
++++ b/src/mesa/main/glthread.c
+@@ -41,6 +41,7 @@
+ #include "main/glformats.h"
+ #include "dispatch.h"
+ #include "main/pixelstore.h"
++#include "main/teximage.h"
+ #include "util/u_atomic.h"
+ #include "util/u_thread.h"
+ #include "util/u_cpu_detect.h"
+@@ -663,7 +664,8 @@ _mesa_glthread_remote_census(char *out, size_t len, uint64_t *waits,
+  * TexImage2D reads nothing and needs no copy. MESA_GLTHREAD_REMOTE_COPY=0
+  * waits, as for client arrays. */
+ struct glthread_remote_image {
+-   bool sub;
++   bool sub, dsa;
++   GLuint texture;
+    GLenum target, format, type;
+    GLint level, a, b, internalformat, border;
+    GLsizei width, height;
+@@ -675,7 +677,11 @@ static void
+ glthread_remote_image_run(struct gl_context *ctx, void *p)
+ {
+    struct glthread_remote_image *im = p;
+-   if (im->sub)
++   if (im->dsa)
++      CALL_TextureSubImage2D(ctx->Dispatch.Current,
++                             (im->texture, im->level, im->a, im->b, im->width,
++                              im->height, im->format, im->type, im->pixels));
++   else if (im->sub)
+       CALL_TexSubImage2D(ctx->Dispatch.Current,
+                          (im->target, im->level, im->a, im->b, im->width,
+                           im->height, im->format, im->type, im->pixels));
+@@ -695,7 +701,10 @@ glthread_remote_image(struct gl_context *ctx, struct glthread_remote_image *args
+       const char *v = getenv("MESA_GLTHREAD_REMOTE_COPY");
+       on = !(v && *v == '0');
+    }
+-   if (!on || args->width < 0 || args->height < 0)
++   /* From a pixel unpack buffer, `pixels` is an offset: the normal path
++    * queues that. */
++   if (!on || args->width < 0 || args->height < 0 ||
++       _mesa_glthread_has_unpack_buffer(ctx))
+       return false;
+    const GLubyte *first = NULL;
+    size_t span = 0;
+@@ -740,6 +749,8 @@ _mesa_glthread_remote_TexImage2D(struct gl_context *ctx, GLenum target,
+                                  GLenum format, GLenum type,
+                                  const GLvoid *pixels)
+ {
++   if (_mesa_is_proxy_texture(target))
++      _mesa_glthread_remote_note_proxy(ctx, target, level, width, height, 1);
+    struct glthread_remote_image args = {
+       .sub = false, .target = target, .format = format, .type = type,
+       .level = level, .internalformat = internalformat, .border = border,
+@@ -899,3 +910,20 @@ _mesa_glthread_PixelStorei(struct gl_context *ctx, GLenum pname, GLint param)
+       break;
+    }
+ }
++
++#if MESA_GLTHREAD_REMOTE
++bool
++_mesa_glthread_remote_TextureSubImage2D(struct gl_context *ctx, GLuint texture,
++                                        GLint level, GLint xoffset,
++                                        GLint yoffset, GLsizei width,
++                                        GLsizei height, GLenum format,
++                                        GLenum type, const GLvoid *pixels)
++{
++   struct glthread_remote_image args = {
++      .sub = true, .dsa = true, .texture = texture, .format = format,
++      .type = type, .level = level, .a = xoffset, .b = yoffset,
++      .width = width, .height = height, .pixels = pixels,
++   };
++   return glthread_remote_image(ctx, &args);
++}
++#endif
+diff --git a/src/mesa/main/glthread.h b/src/mesa/main/glthread.h
+index 57719f5..601e33a 100644
+--- a/src/mesa/main/glthread.h
++++ b/src/mesa/main/glthread.h
+@@ -244,6 +244,27 @@ struct glthread_state
+    /* The GL function the next wait is for, named by the remote-call macros
+     * and _mesa_glthread_finish_before; see _mesa_glthread_remote_census. */
+    const char *sync_why;
++#if MESA_GLTHREAD_REMOTE
++   /* glthread_remote.c: write-only buffer maps staged on this thread and
++    * uploaded at flush/unmap, keyed by target (buffer 0) or buffer name. */
++   struct glthread_remote_map {
++      GLenum target;
++      GLuint buffer;
++      GLintptr offset;
++      GLsizeiptr length;
++      GLbitfield access;
++      uint8_t *data;
++   } remote_maps[4];
++   /* The last proxy glTexImage*D, answered locally by
++    * glGetTexLevelParameteriv. */
++   struct {
++      GLenum target;
++      GLint level;
++      GLsizei width, height, depth;
++   } remote_proxy;
++   /* Vertex array names this thread hands out itself (glthread_remote.c). */
++   GLuint remote_next_vao;
++#endif
+ 
+    /** Display lists. */
+    GLenum16 ListMode; /**< Zero if not inside display list, else list mode. */
+@@ -401,6 +422,79 @@ bool _mesa_glthread_remote_TexSubImage2D(struct gl_context *ctx, GLenum target,
+                                          GLsizei height, GLenum format,
+                                          GLenum type, const GLvoid *pixels);
+ 
++bool _mesa_glthread_remote_TextureSubImage2D(struct gl_context *ctx,
++                                             GLuint texture, GLint level,
++                                             GLint xoffset, GLint yoffset,
++                                             GLsizei width, GLsizei height,
++                                             GLenum format, GLenum type,
++                                             const GLvoid *pixels);
++/* glthread_remote.c: calls a remote context answers or queues without a
++ * round trip to its driver thread. Each returns true if it took the call. */
++bool _mesa_glthread_remote_TexImage1D(struct gl_context *ctx, GLenum target,
++                                      GLint level, GLint internalformat,
++                                      GLsizei width, GLint border,
++                                      GLenum format, GLenum type,
++                                      const GLvoid *pixels);
++bool _mesa_glthread_remote_TexImage3D(struct gl_context *ctx, GLenum target,
++                                      GLint level, GLint internalformat,
++                                      GLsizei width, GLsizei height,
++                                      GLsizei depth, GLint border,
++                                      GLenum format, GLenum type,
++                                      const GLvoid *pixels);
++void _mesa_glthread_remote_note_proxy(struct gl_context *ctx, GLenum target,
++                                      GLint level, GLsizei width,
++                                      GLsizei height, GLsizei depth);
++bool _mesa_glthread_remote_GetTexLevelParameteriv(struct gl_context *ctx,
++                                                  GLenum target, GLint level,
++                                                  GLenum pname, GLint *params);
++bool _mesa_glthread_remote_FenceSync(struct gl_context *ctx, GLenum condition,
++                                     GLbitfield flags, GLsync *ret);
++bool _mesa_glthread_remote_GenTextures(struct gl_context *ctx, GLsizei n,
++                                       GLuint *textures);
++bool _mesa_glthread_remote_GenBuffers(struct gl_context *ctx, GLsizei n,
++                                      GLuint *buffers);
++bool _mesa_glthread_remote_GenVertexArrays(struct gl_context *ctx, GLsizei n,
++                                           GLuint *arrays);
++bool _mesa_glthread_remote_MapBufferRange(struct gl_context *ctx, GLenum target,
++                                          GLintptr offset, GLsizeiptr length,
++                                          GLbitfield access, GLvoid **ret);
++bool _mesa_glthread_remote_MapNamedBufferRange(struct gl_context *ctx,
++                                               GLuint buffer, GLintptr offset,
++                                               GLsizeiptr length,
++                                               GLbitfield access, GLvoid **ret);
++bool _mesa_glthread_remote_FlushMappedBufferRange(struct gl_context *ctx,
++                                                  GLenum target, GLintptr offset,
++                                                  GLsizeiptr length);
++bool _mesa_glthread_remote_FlushMappedNamedBufferRange(struct gl_context *ctx,
++                                                       GLuint buffer,
++                                                       GLintptr offset,
++                                                       GLsizeiptr length);
++bool _mesa_glthread_remote_UnmapBuffer(struct gl_context *ctx, GLenum target,
++                                       GLboolean *ret);
++bool _mesa_glthread_remote_UnmapNamedBufferEXT(struct gl_context *ctx,
++                                               GLuint buffer, GLboolean *ret);
++bool _mesa_glthread_remote_ClearBufferData(struct gl_context *ctx, GLenum target,
++                                           GLenum internalformat, GLenum format,
++                                           GLenum type, const GLvoid *data);
++bool _mesa_glthread_remote_ClearNamedBufferData(struct gl_context *ctx,
++                                                GLuint buffer,
++                                                GLenum internalformat,
++                                                GLenum format, GLenum type,
++                                                const GLvoid *data);
++bool _mesa_glthread_remote_ClearBufferSubData(struct gl_context *ctx,
++                                              GLenum target,
++                                              GLenum internalformat,
++                                              GLintptr offset, GLsizeiptr size,
++                                              GLenum format, GLenum type,
++                                              const GLvoid *data);
++bool _mesa_glthread_remote_ClearNamedBufferSubData(struct gl_context *ctx,
++                                                   GLuint buffer,
++                                                   GLenum internalformat,
++                                                   GLintptr offset,
++                                                   GLsizeiptr size,
++                                                   GLenum format, GLenum type,
++                                                   const GLvoid *data);
++
+ #define GLTHREAD_IS_REMOTE(ctx) unlikely((ctx)->GLThread.remote)
+ /* Before a synchronous call glthread makes on the application thread: in a
+  * remote context, make the named GL call on the driver thread and return. */
+diff --git a/src/mesa/main/glthread_remote.c b/src/mesa/main/glthread_remote.c
+new file mode 100644
+index 0000000..6607cf3
+--- /dev/null
++++ b/src/mesa/main/glthread_remote.c
+@@ -0,0 +1,500 @@
++/*
++ * Copyright © 2026
++ * SPDX-License-Identifier: MIT
++ */
++
++/* MESA_GLTHREAD_REMOTE: calls a remote context takes on the application
++ * thread without a round trip to its driver thread.
++ *
++ * A remote context's driver runs on the browser main thread; a call that
++ * needs an answer waits for that thread to get to it, behind everything
++ * queued before. Each of these is something an application does many times
++ * a frame -- Blender's immediate mode maps a buffer for every widget, and it
++ * creates a texture for every icon -- and each can be answered here:
++ *
++ *  - glGenTextures / glGenBuffers: names come from the share group's tables,
++ *    under their mutexes, with the same empty objects the driver would make
++ *    (pure CPU state, which st/mesa creates without the driver).
++ *  - glGenVertexArrays: a context's own table belongs to its driver thread,
++ *    so names come from a range this thread hands out (from 2^30, which a
++ *    table allocating its lowest free name does not reach), and the objects
++ *    are made there by a queued call, ahead of anything that uses them.
++ *  - Write-only glMapBufferRange that does not need the old contents
++ *    (invalidating, explicitly flushed or unsynchronized): the application
++ *    writes into memory here, and the flushed ranges -- or, unflushed, the
++ *    whole range -- go to the buffer as glBufferSubData at flush or unmap,
++ *    through glthread's own upload path, in order with everything else.
++ *  - glClear*BufferData / glClear*BufferSubData: the clear value (one texel,
++ *    at most 16 bytes) is copied and the call queued.
++ *  - glFenceSync: the sync object is made here, under the share group's
++ *    mutex, and its fence attached by a queued call on the driver thread.
++ *  - glGetTexLevelParameteriv of a proxy target's width, height or depth:
++ *    answered from the last proxy glTexImage*D against the context's limits,
++ *    which is what a proxy query is for (Blender asks for every texture it
++ *    creates).
++ *
++ * WINK_GLTHREAD_REMOTE_FAST=0 turns all of it off, for comparison.
++ */
++
++#include "main/glthread.h"
++#include "main/glthread_marshal.h"
++#include "main/arrayobj.h"
++#include "main/bufferobj.h"
++#include "main/hash.h"
++#include "main/glformats.h"
++#include "main/image.h"
++#include "main/mtypes.h"
++#include "main/syncobj.h"
++#include "main/teximage.h"
++#include "main/texobj.h"
++#include "dispatch.h"
++#include "util/u_debug.h"
++
++#if MESA_GLTHREAD_REMOTE
++
++static bool
++remote_fast(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("WINK_GLTHREAD_REMOTE_FAST", true);
++   return on;
++}
++
++/* ---------------------------------------------------------------------- */
++/* Names */
++
++bool
++_mesa_glthread_remote_GenTextures(struct gl_context *ctx, GLsizei n,
++                                  GLuint *textures)
++{
++   if (!remote_fast() || n < 0 || !textures)
++      return false;
++   struct _mesa_HashTable *table = &ctx->Shared->TexObjects;
++   _mesa_HashLockMutex(table);
++   _mesa_HashFindFreeKeys(table, textures, n);
++   for (GLsizei i = 0; i < n; i++) {
++      struct gl_texture_object *obj = _mesa_new_texture_object(ctx, textures[i], 0);
++      if (!obj) {
++         /* Hand what is left to the driver, which reports the error. */
++         _mesa_HashUnlockMutex(table);
++         return false;
++      }
++      _mesa_HashInsertLocked(table, textures[i], obj);
++   }
++   _mesa_HashUnlockMutex(table);
++   return true;
++}
++
++bool
++_mesa_glthread_remote_GenBuffers(struct gl_context *ctx, GLsizei n,
++                                 GLuint *buffers)
++{
++   if (!remote_fast() || n < 0 || !buffers)
++      return false;
++   _mesa_reserve_buffer_names(ctx, n, buffers);
++   return true;
++}
++
++struct remote_vaos {
++   GLsizei n;
++   GLuint names[];
++};
++
++static void
++remote_vaos_run(struct gl_context *ctx, void *data)
++{
++   struct remote_vaos *v = data;
++   for (GLsizei i = 0; i < v->n; i++) {
++      struct gl_vertex_array_object *obj = _mesa_new_vao(ctx, v->names[i]);
++      if (!obj) {
++         _mesa_error(ctx, GL_OUT_OF_MEMORY, "glGenVertexArrays");
++         break;
++      }
++      _mesa_HashInsertLocked(&ctx->Array.Objects, obj->Name, obj);
++   }
++   free(v);
++}
++
++bool
++_mesa_glthread_remote_GenVertexArrays(struct gl_context *ctx, GLsizei n,
++                                      GLuint *arrays)
++{
++   if (!remote_fast() || n < 0 || !arrays)
++      return false;
++   struct glthread_state *glthread = &ctx->GLThread;
++   if (glthread->remote_next_vao < (1u << 30))
++      glthread->remote_next_vao = 1u << 30;
++   struct remote_vaos *v = malloc(sizeof(*v) + n * sizeof(GLuint));
++   if (!v)
++      return false;
++   v->n = n;
++   for (GLsizei i = 0; i < n; i++)
++      v->names[i] = arrays[i] = glthread->remote_next_vao++;
++   _mesa_glthread_call_async(ctx, remote_vaos_run, v, NULL);
++   _mesa_glthread_GenVertexArrays(ctx, n, arrays);
++   return true;
++}
++
++/* ---------------------------------------------------------------------- */
++/* Write-only maps */
++
++static struct glthread_remote_map *
++remote_map_find(struct gl_context *ctx, GLenum target, GLuint buffer)
++{
++   struct glthread_state *glthread = &ctx->GLThread;
++   for (unsigned i = 0; i < ARRAY_SIZE(glthread->remote_maps); i++) {
++      struct glthread_remote_map *m = &glthread->remote_maps[i];
++      if (m->data && m->target == target && m->buffer == buffer)
++         return m;
++   }
++   return NULL;
++}
++
++static bool
++remote_map(struct gl_context *ctx, GLenum target, GLuint buffer,
++           GLintptr offset, GLsizeiptr length, GLbitfield access, GLvoid **ret)
++{
++   if (!remote_fast())
++      return false;
++   /* Only maps that never show the application the buffer's contents. */
++   if (!(access & GL_MAP_WRITE_BIT) ||
++       (access & (GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT)) ||
++       !(access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT |
++                   GL_MAP_FLUSH_EXPLICIT_BIT | GL_MAP_UNSYNCHRONIZED_BIT)))
++      return false;
++   if (offset < 0 || length <= 0 || length > (64 << 20))
++      return false;
++   if (remote_map_find(ctx, target, buffer))
++      return false; /* already mapped: the driver reports the error */
++   struct glthread_state *glthread = &ctx->GLThread;
++   for (unsigned i = 0; i < ARRAY_SIZE(glthread->remote_maps); i++) {
++      struct glthread_remote_map *m = &glthread->remote_maps[i];
++      if (m->data)
++         continue;
++      m->data = malloc(length);
++      if (!m->data)
++         return false;
++      m->target = target;
++      m->buffer = buffer;
++      m->offset = offset;
++      m->length = length;
++      m->access = access;
++      *ret = m->data;
++      return true;
++   }
++   return false;
++}
++
++/* Upload [off, off+len) of the map through glthread's marshalled upload,
++ * which copies it into the batch (or alongside, when big). */
++static void
++remote_map_upload(struct gl_context *ctx, struct glthread_remote_map *m,
++                  GLintptr off, GLsizeiptr len)
++{
++   if (off < 0 || len <= 0 || off + len > m->length)
++      return;
++   if (m->buffer)
++      CALL_NamedBufferSubData(ctx->MarshalExec,
++                              (m->buffer, m->offset + off, len, m->data + off));
++   else
++      CALL_BufferSubData(ctx->MarshalExec,
++                         (m->target, m->offset + off, len, m->data + off));
++}
++
++static bool
++remote_flush(struct gl_context *ctx, GLenum target, GLuint buffer,
++             GLintptr offset, GLsizeiptr length)
++{
++   struct glthread_remote_map *m = remote_map_find(ctx, target, buffer);
++   if (!m)
++      return false;
++   if (m->access & GL_MAP_FLUSH_EXPLICIT_BIT)
++      remote_map_upload(ctx, m, offset, length);
++   return true;
++}
++
++static bool
++remote_unmap(struct gl_context *ctx, GLenum target, GLuint buffer, GLboolean *ret)
++{
++   struct glthread_remote_map *m = remote_map_find(ctx, target, buffer);
++   if (!m)
++      return false;
++   if (!(m->access & GL_MAP_FLUSH_EXPLICIT_BIT))
++      remote_map_upload(ctx, m, 0, m->length);
++   free(m->data);
++   m->data = NULL;
++   *ret = GL_TRUE;
++   return true;
++}
++
++bool
++_mesa_glthread_remote_MapBufferRange(struct gl_context *ctx, GLenum target,
++                                     GLintptr offset, GLsizeiptr length,
++                                     GLbitfield access, GLvoid **ret)
++{
++   return remote_map(ctx, target, 0, offset, length, access, ret);
++}
++
++bool
++_mesa_glthread_remote_MapNamedBufferRange(struct gl_context *ctx, GLuint buffer,
++                                          GLintptr offset, GLsizeiptr length,
++                                          GLbitfield access, GLvoid **ret)
++{
++   return buffer && remote_map(ctx, 0, buffer, offset, length, access, ret);
++}
++
++bool
++_mesa_glthread_remote_FlushMappedBufferRange(struct gl_context *ctx,
++                                             GLenum target, GLintptr offset,
++                                             GLsizeiptr length)
++{
++   return remote_flush(ctx, target, 0, offset, length);
++}
++
++bool
++_mesa_glthread_remote_FlushMappedNamedBufferRange(struct gl_context *ctx,
++                                                  GLuint buffer, GLintptr offset,
++                                                  GLsizeiptr length)
++{
++   return buffer && remote_flush(ctx, 0, buffer, offset, length);
++}
++
++bool
++_mesa_glthread_remote_UnmapBuffer(struct gl_context *ctx, GLenum target,
++                                  GLboolean *ret)
++{
++   return remote_unmap(ctx, target, 0, ret);
++}
++
++bool
++_mesa_glthread_remote_UnmapNamedBufferEXT(struct gl_context *ctx, GLuint buffer,
++                                          GLboolean *ret)
++{
++   return buffer && remote_unmap(ctx, 0, buffer, ret);
++}
++
++/* ---------------------------------------------------------------------- */
++/* Buffer clears */
++
++struct remote_clear {
++   GLenum target;
++   GLuint buffer;
++   GLenum internalformat, format, type;
++   GLintptr offset;
++   GLsizeiptr size;
++   bool sub, has_data;
++   uint8_t data[16];
++};
++
++static void
++remote_clear_run(struct gl_context *ctx, void *p)
++{
++   struct remote_clear *c = p;
++   const void *data = c->has_data ? c->data : NULL;
++   if (c->buffer && c->sub)
++      CALL_ClearNamedBufferSubData(ctx->Dispatch.Current,
++                                   (c->buffer, c->internalformat, c->offset,
++                                    c->size, c->format, c->type, data));
++   else if (c->buffer)
++      CALL_ClearNamedBufferData(ctx->Dispatch.Current,
++                                (c->buffer, c->internalformat, c->format,
++                                 c->type, data));
++   else if (c->sub)
++      CALL_ClearBufferSubData(ctx->Dispatch.Current,
++                              (c->target, c->internalformat, c->offset,
++                               c->size, c->format, c->type, data));
++   else
++      CALL_ClearBufferData(ctx->Dispatch.Current,
++                           (c->target, c->internalformat, c->format, c->type,
++                            data));
++   free(c);
++}
++
++static bool
++remote_clear(struct gl_context *ctx, struct remote_clear *args, const GLvoid *data)
++{
++   if (!remote_fast())
++      return false;
++   if (data) {
++      const GLint bpp = _mesa_bytes_per_pixel(args->format, args->type);
++      if (bpp <= 0 || bpp > 16)
++         return false;
++      memcpy(args->data, data, bpp);
++      args->has_data = true;
++   }
++   struct remote_clear *c = malloc(sizeof(*c));
++   if (!c)
++      return false;
++   *c = *args;
++   _mesa_glthread_call_async(ctx, remote_clear_run, c, NULL);
++   return true;
++}
++
++bool
++_mesa_glthread_remote_ClearBufferData(struct gl_context *ctx, GLenum target,
++                                      GLenum internalformat, GLenum format,
++                                      GLenum type, const GLvoid *data)
++{
++   struct remote_clear c = { .target = target, .internalformat = internalformat,
++                             .format = format, .type = type };
++   return remote_clear(ctx, &c, data);
++}
++
++bool
++_mesa_glthread_remote_ClearNamedBufferData(struct gl_context *ctx, GLuint buffer,
++                                           GLenum internalformat, GLenum format,
++                                           GLenum type, const GLvoid *data)
++{
++   struct remote_clear c = { .buffer = buffer, .internalformat = internalformat,
++                             .format = format, .type = type };
++   return buffer && remote_clear(ctx, &c, data);
++}
++
++bool
++_mesa_glthread_remote_ClearBufferSubData(struct gl_context *ctx, GLenum target,
++                                         GLenum internalformat, GLintptr offset,
++                                         GLsizeiptr size, GLenum format,
++                                         GLenum type, const GLvoid *data)
++{
++   struct remote_clear c = { .target = target, .internalformat = internalformat,
++                             .format = format, .type = type, .offset = offset,
++                             .size = size, .sub = true };
++   return remote_clear(ctx, &c, data);
++}
++
++bool
++_mesa_glthread_remote_ClearNamedBufferSubData(struct gl_context *ctx,
++                                              GLuint buffer,
++                                              GLenum internalformat,
++                                              GLintptr offset, GLsizeiptr size,
++                                              GLenum format, GLenum type,
++                                              const GLvoid *data)
++{
++   struct remote_clear c = { .buffer = buffer, .internalformat = internalformat,
++                             .format = format, .type = type, .offset = offset,
++                             .size = size, .sub = true };
++   return buffer && remote_clear(ctx, &c, data);
++}
++
++/* ---------------------------------------------------------------------- */
++/* Fences */
++
++static void
++remote_fence_run(struct gl_context *ctx, void *data)
++{
++   _mesa_fence_sync_object(ctx, data);
++}
++
++bool
++_mesa_glthread_remote_FenceSync(struct gl_context *ctx, GLenum condition,
++                                GLbitfield flags, GLsync *ret)
++{
++   if (!remote_fast() || condition != GL_SYNC_GPU_COMMANDS_COMPLETE || flags)
++      return false;
++   struct gl_sync_object *so = _mesa_new_unfenced_sync(ctx, condition, flags);
++   if (!so)
++      return false;
++   _mesa_glthread_call_async(ctx, remote_fence_run, so, NULL);
++   *ret = (GLsync)so;
++   return true;
++}
++
++/* ---------------------------------------------------------------------- */
++/* Proxy textures */
++
++void
++_mesa_glthread_remote_note_proxy(struct gl_context *ctx, GLenum target,
++                                 GLint level, GLsizei width, GLsizei height,
++                                 GLsizei depth)
++{
++   ctx->GLThread.remote_proxy.target = target;
++   ctx->GLThread.remote_proxy.level = level;
++   ctx->GLThread.remote_proxy.width = width;
++   ctx->GLThread.remote_proxy.height = height;
++   ctx->GLThread.remote_proxy.depth = depth;
++}
++
++bool
++_mesa_glthread_remote_TexImage1D(struct gl_context *ctx, GLenum target,
++                                 GLint level, GLint internalformat,
++                                 GLsizei width, GLint border, GLenum format,
++                                 GLenum type, const GLvoid *pixels)
++{
++   if (_mesa_is_proxy_texture(target))
++      _mesa_glthread_remote_note_proxy(ctx, target, level, width, 1, 1);
++   return false;
++}
++
++bool
++_mesa_glthread_remote_TexImage3D(struct gl_context *ctx, GLenum target,
++                                 GLint level, GLint internalformat,
++                                 GLsizei width, GLsizei height, GLsizei depth,
++                                 GLint border, GLenum format, GLenum type,
++                                 const GLvoid *pixels)
++{
++   if (_mesa_is_proxy_texture(target))
++      _mesa_glthread_remote_note_proxy(ctx, target, level, width, height, depth);
++   return false;
++}
++
++static bool
++remote_proxy_fits(struct gl_context *ctx, GLenum target, GLint level,
++                  GLsizei w, GLsizei h, GLsizei d)
++{
++   const struct gl_constants *c = &ctx->Const;
++   if (level < 0 || w <= 0 || h <= 0 || d <= 0)
++      return false;
++   GLint max;
++   switch (target) {
++   case GL_PROXY_TEXTURE_3D:
++      max = 1 << (c->Max3DTextureLevels - 1);
++      return level < c->Max3DTextureLevels && w <= max && h <= max && d <= max;
++   case GL_PROXY_TEXTURE_CUBE_MAP:
++      max = 1 << (c->MaxCubeTextureLevels - 1);
++      return level < c->MaxCubeTextureLevels && w <= max && h <= max && w == h;
++   case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
++      max = 1 << (c->MaxCubeTextureLevels - 1);
++      return level < c->MaxCubeTextureLevels && w <= max && h <= max && w == h &&
++             d <= (GLsizei)c->MaxArrayTextureLayers;
++   case GL_PROXY_TEXTURE_RECTANGLE:
++      return level == 0 && w <= (GLsizei)c->MaxTextureRectSize &&
++             h <= (GLsizei)c->MaxTextureRectSize;
++   case GL_PROXY_TEXTURE_1D_ARRAY:
++      return level < _mesa_max_texture_levels(ctx, target) &&
++             w <= (GLsizei)c->MaxTextureSize && h <= (GLsizei)c->MaxArrayTextureLayers;
++   case GL_PROXY_TEXTURE_2D_ARRAY:
++      return level < _mesa_max_texture_levels(ctx, target) &&
++             w <= (GLsizei)c->MaxTextureSize && h <= (GLsizei)c->MaxTextureSize &&
++             d <= (GLsizei)c->MaxArrayTextureLayers;
++   case GL_PROXY_TEXTURE_1D:
++   case GL_PROXY_TEXTURE_2D:
++      return level < _mesa_max_texture_levels(ctx, target) &&
++             w <= (GLsizei)c->MaxTextureSize && h <= (GLsizei)c->MaxTextureSize;
++   default:
++      return false;
++   }
++}
++
++bool
++_mesa_glthread_remote_GetTexLevelParameteriv(struct gl_context *ctx,
++                                             GLenum target, GLint level,
++                                             GLenum pname, GLint *params)
++{
++   const __typeof__(ctx->GLThread.remote_proxy) *p = &ctx->GLThread.remote_proxy;
++   if (!remote_fast() || !params || !_mesa_is_proxy_texture(target) ||
++       p->target != target || p->level != level)
++      return false;
++   if (pname != GL_TEXTURE_WIDTH && pname != GL_TEXTURE_HEIGHT &&
++       pname != GL_TEXTURE_DEPTH)
++      return false;
++   if (!remote_proxy_fits(ctx, target, level, p->width, p->height, p->depth)) {
++      *params = 0;
++      return true;
++   }
++   *params = pname == GL_TEXTURE_WIDTH ? p->width
++           : pname == GL_TEXTURE_HEIGHT ? p->height : p->depth;
++   return true;
++}
++
++#endif /* MESA_GLTHREAD_REMOTE */
+diff --git a/src/mesa/main/syncobj.c b/src/mesa/main/syncobj.c
+index b7a8df8..273e326 100644
+--- a/src/mesa/main/syncobj.c
++++ b/src/mesa/main/syncobj.c
+@@ -307,6 +307,39 @@ _mesa_fence_sync(struct gl_context *ctx, GLenum condition, GLbitfield flags)
+ }
+ 
+ 
++/**
++ * glFenceSync for a remote glthread context's application thread
++ * (glthread_remote.c): the object, made and published here so the handle can
++ * be returned at once. Its fence is attached on the driver thread by
++ * _mesa_fence_sync_object, queued ahead of anything that can wait on it.
++ */
++struct gl_sync_object *
++_mesa_new_unfenced_sync(struct gl_context *ctx, GLenum condition, GLbitfield flags)
++{
++   struct gl_sync_object *syncObj = new_sync_object(ctx);
++   if (!syncObj)
++      return NULL;
++   syncObj->Name = 1;
++   syncObj->RefCount = 1;
++   syncObj->DeletePending = GL_FALSE;
++   syncObj->SyncCondition = condition;
++   syncObj->Flags = flags;
++   syncObj->StatusFlag = 0;
++   simple_mtx_lock(&ctx->Shared->Mutex);
++   _mesa_set_add(ctx->Shared->SyncObjects, syncObj);
++   simple_mtx_unlock(&ctx->Shared->Mutex);
++   return syncObj;
++}
++
++void
++_mesa_fence_sync_object(struct gl_context *ctx, struct gl_sync_object *syncObj)
++{
++   simple_mtx_lock(&syncObj->mutex);
++   ctx->pipe->flush(ctx->pipe, &syncObj->fence, 0);
++   simple_mtx_unlock(&syncObj->mutex);
++}
++
++
+ GLsync GLAPIENTRY
+ _mesa_FenceSync_no_error(GLenum condition, GLbitfield flags)
+ {
+diff --git a/src/mesa/main/syncobj.h b/src/mesa/main/syncobj.h
+index 9f69543..a2ba36e 100644
+--- a/src/mesa/main/syncobj.h
++++ b/src/mesa/main/syncobj.h
+@@ -54,4 +54,10 @@ extern void
+ _mesa_unref_sync_object(struct gl_context *ctx, struct gl_sync_object *syncObj,
+                         int amount);
+ 
++struct gl_sync_object *
++_mesa_new_unfenced_sync(struct gl_context *ctx, GLenum condition, GLbitfield flags);
++
++void
++_mesa_fence_sync_object(struct gl_context *ctx, struct gl_sync_object *syncObj);
++
+ #endif /* SYNCOBJ_H */
+diff --git a/src/mesa/meson.build b/src/mesa/meson.build
+index 08eb7e5..cef2547 100644
+--- a/src/mesa/meson.build
++++ b/src/mesa/meson.build
+@@ -101,6 +101,7 @@ files_libmesa = files(
+   'main/glspirv.c',
+   'main/glspirv.h',
+   'main/glthread.c',
++  'main/glthread_remote.c',
+   'main/glthread.h',
+   'main/glthread_bufferobj.c',
+   'main/glthread_draw.c',
+diff --git a/src/wink/compiler/gex_wgpu_tint.cpp b/src/wink/compiler/gex_wgpu_tint.cpp
+index 68b64fa..aff4f45 100644
+--- a/src/wink/compiler/gex_wgpu_tint.cpp
++++ b/src/wink/compiler/gex_wgpu_tint.cpp
+@@ -623,8 +623,17 @@ insert(const cache_key &k, std::string &&wgsl, bool fresh)
+ }
+ 
+ const char cache_magic[8] = {'G', 'X', 'W', 'G', 'S', 'L', '1', 0};
+-/* This build: a blob from any other is not trusted. */
++/* This build: a blob from any other is not trusted. The packaging names
++ * the Tint it built in gex_tint_id.h -- its revision, patches, compiler and
++ * flags -- so a blob made by an identical build elsewhere (a site's shipped
++ * cache, made on a developer machine) is accepted; without it, the time of
++ * this compile stands in. */
++#if __has_include("gex_tint_id.h")
++#include "gex_tint_id.h"
++const char cache_build[] = "tint " GEX_TINT_ID;
++#else
+ const char cache_build[] = __DATE__ " " __TIME__ " " __FILE__;
++#endif
+ 
+ cache_key key_of(const uint32_t *words, size_t n)
+ {
+diff --git a/wink/cross/wink-cross.ini.in b/wink/cross/wink-cross.ini.in
+index a167697..34a8ace 100644
+--- a/wink/cross/wink-cross.ini.in
++++ b/wink/cross/wink-cross.ini.in
+@@ -28,7 +28,7 @@ endian = 'little'
+ needs_exe_wrapper = true
+ 
+ [built-in options]
+-c_args = ['-D_GNU_SOURCE', '-D_POSIX_C_SOURCE=200809L', '-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm'@PTHREAD@]
+-cpp_args = ['-D_GNU_SOURCE', '-D_POSIX_C_SOURCE=200809L', '-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm'@PTHREAD@]
+-c_link_args = ['-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm'@PTHREAD@]
+-cpp_link_args = ['-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm'@PTHREAD@]
++c_args = ['-D_GNU_SOURCE', '-D_POSIX_C_SOURCE=200809L', '-sSUPPORT_LONGJMP=emscripten'@PTHREAD@]
++cpp_args = ['-D_GNU_SOURCE', '-D_POSIX_C_SOURCE=200809L', '-sSUPPORT_LONGJMP=emscripten'@PTHREAD@]
++c_link_args = ['-sSUPPORT_LONGJMP=emscripten'@PTHREAD@]
++cpp_link_args = ['-sSUPPORT_LONGJMP=emscripten'@PTHREAD@]
+diff --git a/wink/lib/mesa.sh b/wink/lib/mesa.sh
+index d33fbcd..95200ac 100644
+--- a/wink/lib/mesa.sh
++++ b/wink/lib/mesa.sh
+@@ -45,8 +45,6 @@ for e in json.load(open(path)):
+         bad.append('%s: missing -pthread' % name)
+     if variant == 'st' and has_pt:
+         bad.append('%s: -pthread in the st variant' % name)
+-    if '-fwasm-exceptions' not in args:
+-        bad.append('%s: missing -fwasm-exceptions' % name)
+ if bad:
+     sys.stderr.write('\n'.join(bad[:20]) + '\n')
+     sys.exit('%d compile commands with the wrong ABI flags' % len(bad))
+@@ -79,6 +77,13 @@ EOF
+   fi
+   printf '%s' "$key" > "$keyfile"
+ 
++  # Names this Tint for the WGSL cache's blobs (gex_wgpu_tint.cpp): the
++  # directory is keyed by everything the translation depends on.
++  local tint_id
++  tint_id="#define GEX_TINT_ID \"$(basename "$WINK_TINT")\""
++  if [ "$(cat "$WINK_TINT/include/gex_tint_id.h" 2>/dev/null)" != "$tint_id" ]; then
++    printf '%s\n' "$tint_id" > "$WINK_TINT/include/gex_tint_id.h"
++  fi
+   log "building"
+   run ninja -C "$build" -j "$WINK_JOBS" \
+     src/gallium/targets/wink-wasm/wink.o \
+diff --git a/wink/lib/package.sh b/wink/lib/package.sh
+index 6bef7e0..546cb16 100644
+--- a/wink/lib/package.sh
++++ b/wink/lib/package.sh
+@@ -77,7 +77,7 @@ e = os.environ
+ v, tmp = e['WINK_V'], e['WINK_TMP']
+ mt = v == 'mt'
+ js = e['WINK_JS_ORDER'].split()
+-required = ['-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm', '-sWASM_BIGINT=1'] + (['-pthread'] if mt else [])
++required = ['-fexceptions', '-sSUPPORT_LONGJMP=emscripten', '-sWASM_BIGINT=1'] + (['-pthread'] if mt else [])
+ # Tint's passes recurse deeply; a 16 MB stack needs an initial memory above it.
+ # Every pthread's stack is DEFAULT_PTHREAD_STACK_SIZE, which is STACK_SIZE
+ # unless set: 16 MB each of the program's threads. GL compiles its shaders
+@@ -86,8 +86,7 @@ required = ['-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm', '-sWASM_BIGINT=1'] +
+ recommended = ['-sALLOW_MEMORY_GROWTH=1', '-sMAXIMUM_MEMORY=4GB', '-sSTACK_SIZE=16MB', '-sINITIAL_MEMORY>=32MB']
+ if mt:
+     recommended.append('-sDEFAULT_PTHREAD_STACK_SIZE=2MB')
+-forbidden = ['-sUSE_WEBGPU=1', '-fexceptions (JS exceptions)', '-sDISABLE_EXCEPTION_CATCHING=0',
+-             '-sSUPPORT_LONGJMP=emscripten', '-fPIC objects in the same link']
++forbidden = ['-sUSE_WEBGPU=1', '-fwasm-exceptions', '-sSUPPORT_LONGJMP=wasm', '-fPIC objects in the same link']
+ files = {}
+ for root, _, names in os.walk(tmp):
+     for n in names:
+diff --git a/wink/lib/tint.sh b/wink/lib/tint.sh
+index 1d7a213..78d5be2 100644
+--- a/wink/lib/tint.sh
++++ b/wink/lib/tint.sh
+@@ -64,8 +64,10 @@ tint_setup() {  # <variant>
+     return 0
+   fi
+ 
+-  local flags=""
+-  [ "$variant" = mt ] && flags="-pthread"
++  # Newer clangs (emsdk 4+) warn on __COUNTER__ as a C2y extension, which
++  # Dawn's -pedantic-errors -Weverything turns into an error.
++  local flags="-Wno-c2y-extensions -Wno-deprecated-pragma -Wno-error"
++  [ "$variant" = mt ] && flags="-pthread $flags"
+   local key="variant=$variant emcc=$WINK_EMCC_VERSION_LINE dawn=$WINK_DAWN_REF patch=$(hash_file "$WINK_DIR/patches/dawn-tint-emscripten.patch") formats=$(hash_file "$WINK_DIR/patches/tint-spirv-reader-texel-formats.patch") novalidate=$(hash_file "$WINK_DIR/patches/tint-spirv-reader-skip-validation.patch") spvtools=$WINK_SPIRV_TOOLS_REV flags=$flags"
+   WINK_TINT="$WINK_CACHE/tint/$variant-em$WINK_EMSDK_VERSION-$(hash_str "$key")"
+   stamp_ok "$WINK_TINT" "$key" && { log "cached at $WINK_TINT"; return 0; }
+@@ -87,7 +89,8 @@ tint_setup() {  # <variant>
+     -DDAWN_USE_GLFW=OFF -DDAWN_USE_X11=OFF -DDAWN_USE_WAYLAND=OFF \
+     -DDAWN_ENABLE_INSTALL=OFF -DTINT_ENABLE_INSTALL=OFF >/dev/null
+   log "building tint_api"
+-  run cmake --build "$build" --target tint_api -j "$WINK_JOBS" >/dev/null
++  run cmake --build "$build" --target tint_api -j "$WINK_JOBS" > "$build.log" 2>&1 \
++    || { tail -50 "$build.log" >&2; die "tint build failed (full log: $build.log)"; }
+ 
+   # One archive, merged with an MRI script. emar is llvm-ar, which reads MRI on
+   # every host, unlike the macOS system ar.
+diff --git a/wink/tools/wink-symbols.py b/wink/tools/wink-symbols.py
+index 7d16983..c80f467 100755
+--- a/wink/tools/wink-symbols.py
++++ b/wink/tools/wink-symbols.py
+@@ -88,9 +88,8 @@ def main():
+         fails.append('GL entry points in wink.o (use wink_get_proc_address): ' + ' '.join(gl[:30]))
+     shims = sorted(s for s in w_undef if SHIM_RE.match(s))
+     if shims:
+-        fails.append('JS exception/setjmp shims referenced (missing -fwasm-exceptions?): ' + ' '.join(shims[:30]))
+-    if any(h in w_undef for h in SJLJ_HELPERS) and '__wasm_longjmp' not in w_undef:
+-        fails.append('setjmp is used but not in wasm mode: no __wasm_longjmp reference')
++        # blender-wasm links JS-mode exceptions and setjmp/longjmp throughout.
++        notes.append('JS exception/setjmp shims referenced (JS-mode EH build): ' + ' '.join(shims[:30]))
+     # The setjmp helpers are the compiler's ABI with compiler-rt, and they were
+     # renamed (saveSetjmp -> __wasm_setjmp) between LLVM builds that both call
+     # themselves 19 and ship as Emscripten 3.1.56. .NET's workload pack pairs a
