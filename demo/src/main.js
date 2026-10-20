@@ -461,7 +461,14 @@ window.addEventListener(
 async function snapshotForParent() {
   if (!embed.sessionUrl || !window.Module?.FS) throw new Error("No embedded session is open");
   canvas.focus();
-  const previousModified = window.Module.FS.stat(embed.sessionPath).mtime.getTime();
+  // WasmFS reports mtime as a number of seconds (the JS FS as a Date), and a
+  // save inside the same second keeps it, so size is part of the stamp too.
+  const fileStamp = () => {
+    const stat = window.Module.FS.stat(embed.sessionPath);
+    const mtime = stat.mtime instanceof Date ? stat.mtime.getTime() : Number(stat.mtime);
+    return `${mtime}:${stat.size}`;
+  };
+  const previousStamp = fileStamp();
   const saved = new Promise((resolve, reject) => {
     let poll;
     const finish = () => {
@@ -478,7 +485,7 @@ async function snapshotForParent() {
     resolveEmbedSave = finish;
     poll = setInterval(() => {
       try {
-        if (window.Module.FS.stat(embed.sessionPath).mtime.getTime() > previousModified) finish();
+        if (fileStamp() !== previousStamp) finish();
       } catch (e) { /* Blender may briefly replace the file while saving. */ }
     }, 100);
   });

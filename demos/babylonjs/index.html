@@ -10,6 +10,16 @@
     <main>
       <canvas id="viewport"></canvas>
       <div id="drop-hint">Drop a .blend, .glb, .babylon, .obj, .fbx …</div>
+      <div id="ui-panel" hidden>
+        <div class="ui-bar">
+          <strong>Blender UI</strong>
+          <span id="ui-status"></span>
+          <span class="spacer"></span>
+          <button id="ui-save">Save back to Babylon</button>
+          <button id="ui-close">Close</button>
+        </div>
+        <iframe id="ui-frame" title="Blender"></iframe>
+      </div>
     </main>
     <aside>
       <header>
@@ -26,6 +36,12 @@
             accept=".blend,.glb,.gltf,.babylon,.obj,.fbx,.stl,.ply,.usdz,.usda,.usdc" /></label>
         </div>
         <p class="hint">.blend and .fbx/.ply open in Blender. .glb/.gltf/.obj/.stl open in Blender too; hold Shift to open them in Babylon only. .babylon and USD open in Babylon.</p>
+      </section>
+
+      <section>
+        <h2>Blender UI</h2>
+        <div class="row"><button id="ui-open">Open in Blender UI</button></div>
+        <p class="hint">The full Blender interface on WebGPU, in this tab. It opens the current .blend; "Save back" makes your edits the session again.</p>
       </section>
 
       <section>

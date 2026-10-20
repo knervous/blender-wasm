@@ -7,6 +7,8 @@
   "license": "GPL-2.0-or-later",
   "scripts": {
     "blender": "node scripts/prepare-blender.mjs",
+    "blender:headless": "node scripts/prepare-blender.mjs headless",
+    "blender:ui": "node scripts/prepare-blender.mjs ui",
     "blender:rebuild": "node scripts/prepare-blender.mjs --rebuild",
     "dev": "vite",
     "build": "vite build",

@@ -190,7 +190,7 @@ async function blenderTask(label, task) {
     setStatus(`${label} failed: ${error.message}`, "error");
     console.error(error);
   } finally {
-    actionButtons().forEach((b) => { b.disabled = false; });
+    actionButtons().forEach((b) => { b.disabled = b.title.startsWith("Not installed"); });
     renderOutliner();
   }
 }
@@ -228,6 +228,11 @@ async function openFile(file, { babylonOnly = false } = {}) {
   const blenderCan = BLENDER_FORMATS.includes(ext);
   const babylonCan = ["glb", "gltf", "obj", "stl", "babylon", "usdz", "usda", "usdc", "usd"].includes(ext);
   if (blenderCan && !(babylonOnly && babylonCan)) {
+    if (!session && ext === "blend") {
+      looseBlend = bytes;
+      setStatus(`Holding ${file.name} for the Blender UI; the headless runtime is needed to show it in Babylon.`);
+      return;
+    }
     await blenderTask(`Open ${file.name} in Blender`, () => session.open(file.name, bytes));
   } else if (babylonCan) {
     await openInBabylon(file).catch((error) => setStatus(`Open failed: ${error.message}`, "error"));
@@ -235,6 +240,73 @@ async function openFile(file, { babylonOnly = false } = {}) {
     setStatus(`Neither side opens .${ext}`, "error");
   }
 }
+
+/* ----------------------------------------------------------- Blender UI */
+/* The full Blender interface (the headed WebGPU build) in an iframe on this
+ * origin, driven over its embed protocol (blender-embed-* messages): it opens
+ * the current .blend, and "Save back" returns the edited file, which becomes
+ * the session again. */
+let looseBlend = null; // a .blend held while no headless runtime is installed
+const currentBlend = () => session?.blend ?? looseBlend;
+const uiPanel = $("ui-panel");
+const uiFrame = $("ui-frame");
+const uiStatus = $("ui-status");
+let uiSessionUrl = null;
+
+function openBlenderUi() {
+  // index.html explicitly: static servers (Vite included) do not all map a
+  // directory URL under public/ to its index.
+  const url = new URL("blender-ui/index.html", document.baseURI);
+  url.searchParams.set("embed", "1");
+  url.searchParams.set("id", "babylon-demo");
+  const blend = currentBlend();
+  if (uiSessionUrl) URL.revokeObjectURL(uiSessionUrl);
+  uiSessionUrl = blend ? URL.createObjectURL(new Blob([blend], { type: "application/x-blender" })) : null;
+  if (uiSessionUrl) url.searchParams.set("session", uiSessionUrl);
+  // Saving writes back over the staged file, so there is nothing to save without one.
+  $("ui-save").disabled = !uiSessionUrl;
+  uiStatus.textContent = blend ? "starting…" : "starting with Blender's own startup scene (open a .blend to edit it here)";
+  uiFrame.src = url.href;
+  uiPanel.hidden = false;
+}
+
+function closeBlenderUi() {
+  uiPanel.hidden = true;
+  uiFrame.src = "about:blank"; // ends that Blender and its threads
+  if (uiSessionUrl) URL.revokeObjectURL(uiSessionUrl);
+  uiSessionUrl = null;
+}
+
+async function adoptFromUi(bytes) {
+  closeBlenderUi();
+  if (session) {
+    await blenderTask("Bring the Blender UI edits back", () => session.open("blender-ui.blend", bytes));
+  } else {
+    looseBlend = bytes;
+    setStatus(`Kept the edited .blend (${(bytes.length / 1048576).toFixed(1)} MB); the headless runtime is needed to show it in Babylon.`);
+  }
+}
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin || event.source !== uiFrame.contentWindow) return;
+  const { type, ...data } = event.data ?? {};
+  if (type === "blender-embed-progress") {
+    uiStatus.textContent = `${data.phase ?? "loading"}${typeof data.percent === "number" ? ` ${data.percent}%` : ""}`;
+  } else if (type === "blender-embed-ready") {
+    uiStatus.textContent = "ready";
+  } else if (type === "blender-embed-error") {
+    uiStatus.textContent = `error: ${data.message}`;
+  } else if (type === "blender-embed-snapshot" && data.session) {
+    void adoptFromUi(new Uint8Array(data.session));
+  }
+});
+
+$("ui-open").onclick = openBlenderUi;
+$("ui-close").onclick = closeBlenderUi;
+$("ui-save").onclick = () => {
+  uiStatus.textContent = "saving…";
+  uiFrame.contentWindow.postMessage({ type: "blender-embed-save" }, window.location.origin);
+};
 
 /* ------------------------------------------------------------------ UI */
 function download(name, bytes, type) {
@@ -309,7 +381,7 @@ $("delete").onclick = () => {
   renderOutliner();
 };
 
-$("dl-blend").onclick = () => session?.blend ? download("scene.blend", session.blend, "application/x-blender") : setStatus("No Blender session yet");
+$("dl-blend").onclick = () => currentBlend() ? download("scene.blend", currentBlend(), "application/x-blender") : setStatus("No .blend yet");
 $("dl-glb").onclick = () => lastGlb ? download("scene.glb", lastGlb, "model/gltf-binary") : setStatus("No Blender export yet");
 $("dl-babylon").onclick = async () => download("scene.babylon", JSON.stringify(await SceneSerializer.SerializeAsync(scene)), "application/json");
 
@@ -321,6 +393,11 @@ async function boot() {
     setStatus("This page is not cross-origin isolated (COOP/COEP); Blender's threads cannot start.", "error");
     return;
   }
+  // The Blender UI is a separate install (`npm run blender:ui`).
+  const uiInstalled = await fetch("blender-ui/manifest.json", { cache: "no-store" })
+    .then((r) => r.ok && (r.headers.get("content-type") ?? "").includes("json"), () => false);
+  $("ui-open").disabled = !uiInstalled;
+  if (!uiInstalled) $("ui-open").title = "Not installed: npm run blender:ui";
   const manifest = await runtimeInstalled();
   if (!manifest) {
     ui.runtime.textContent = "not installed";

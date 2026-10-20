@@ -55,3 +55,10 @@ textarea {
   flex: 1; margin: 0; overflow: auto; font: 11px/1.35 ui-monospace, monospace; color: #b8b8bd;
   background: #1a1a1c; border: 1px solid var(--line); border-radius: 4px; padding: 8px; white-space: pre-wrap;
 }
+
+#ui-panel { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 5; }
+#ui-panel[hidden] { display: none; }
+.ui-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.ui-bar .spacer { flex: 1; }
+#ui-status { color: var(--muted); }
+#ui-frame { flex: 1; border: 0; width: 100%; }

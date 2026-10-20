@@ -15,12 +15,17 @@ wave() {  # wave <name> <script...>
   echo "==== wave: $name ===="
   local pids=() s
   for s in "$@"; do
+    # A dep that already built is kept (FORCE=1 rebuilds it), so a retry after
+    # one failure does not recompile the waves before it.
+    if [ "${FORCE:-0}" != 1 ] && [ "$(cat "$SC/$s.status" 2>/dev/null)" = 0 ]; then continue; fi
     # At most DEP_JOBS deps at once (each already runs NPROC compile jobs).
     while [ "$(jobs -rp | wc -l)" -ge "$DEP_JOBS" ]; do sleep 2; done
     ( bash "scripts/build_$s.sh" >"$SC/$s.log" 2>&1; echo "$?" >"$SC/$s.status" ) &
     pids+=($!)
   done
-  wait "${pids[@]}" || true
+  # Guarded: a wave whose deps were all built already starts nothing, and an
+  # empty "${pids[@]}" is an unbound variable under bash 3.2's set -u.
+  if [ "${#pids[@]}" -gt 0 ]; then wait "${pids[@]}" || true; fi
   local fail=0 failed=()
   for s in "$@"; do
     local rc; rc=$(cat "$SC/$s.status" 2>/dev/null || echo 1)
