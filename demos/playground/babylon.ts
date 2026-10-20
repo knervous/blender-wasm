@@ -1,14 +1,13 @@
-// Scratch: Blender (WebAssembly) and Babylon.js as one project, for
-// https://playground.babylonjs.com/ once @knervous/blender-web is on npm.
-//
-// The playground page is not cross-origin isolated, so this runs the
-// single-threaded (JSPI) build; the runtime comes from the package on the CDN.
-// `BABYLON`, `engine` and `canvas` are the playground's globals.
-import { Project } from "@knervous/blender-web";
-import { createBlenderSession } from "@knervous/blender-web/browser";
-import { BabylonSide } from "@knervous/blender-web/babylon";
+// Blender inside the Babylon.js Playground (https://playground.babylonjs.com).
+// Blender runs as WebAssembly in a worker; @knervous/blender-web keeps it and
+// this scene in step. Click a mesh to nudge it: the move syncs to Blender.
+import { Project } from "@knervous/blender-web@0.0.2";
+import { createBlenderSession } from "@knervous/blender-web@0.0.2/browser";
+import { BabylonSide } from "@knervous/blender-web@0.0.2/babylon";
 
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.1/runtime/";
+// The runtime ships in the package; the CDN serves it as-is. Keep its
+// version the same as the imports'.
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/";
 
 export const createScene = async function () {
     const scene = new BABYLON.Scene(engine);
@@ -16,37 +15,45 @@ export const createScene = async function () {
     camera.attachControl(canvas, true);
     new BABYLON.HemisphericLight("sky", new BABYLON.Vector3(0, 1, 0), scene);
 
-    // The adapter uses the playground's own Babylon.
+    // Boot progress on screen (the playground page isn't cross-origin
+    // isolated, so this is the single-threaded build).
+    const label = Object.assign(document.createElement("div"), { style: "position:absolute;top:8px;left:8px;color:#ddd;font:13px sans-serif" });
+    canvas.parentElement!.append(label);
+
+    // The project: Blender on one side, this scene (via the playground's own BABYLON) on the other.
     const side = new BabylonSide(BABYLON, scene);
     const session = createBlenderSession({
         runtimeUrl: RUNTIME,
-        onProgress: (p) => console.log(`blender: ${p.detail} ${Math.round(p.fraction * 100)}%`),
+        onProgress: (p) => { label.textContent = `Blender: ${p.detail} ${Math.round(p.fraction * 100)}%`; },
     });
     const project = new Project({ session, scene: side });
 
     void (async () => {
         await project.newScene(); // Blender's startup cube, light and camera arrive as Babylon nodes
-        console.log(`blender (${session.flavor}) booted in ${(session.bootMs / 1000).toFixed(1)} s`);
 
-        await project.sync({
-            script: `
+        // Blender models: a smooth monkey with an array, in orange.
+        await project.sync({ script: `
 import bpy
 bpy.ops.mesh.primitive_monkey_add(location=(0, -3, 1))
-monkey = bpy.context.object
-row = monkey.modifiers.new("row", "ARRAY")
-row.count = 3
-bevel = monkey.modifiers.new("bevel", "BEVEL")
-bevel.width = 0.02
-`,
-        });
+m = bpy.context.object
+m.modifiers.new("row", "ARRAY").count = 3
+bpy.ops.object.shade_smooth()
+mat = bpy.data.materials.new("orange")
+mat.diffuse_color = (0.9, 0.35, 0.05, 1)
+m.data.materials.append(mat)
+` });
+        label.textContent = `Blender ${session.flavor} · booted in ${(session.bootMs / 1000).toFixed(1)} s · click a mesh`;
+    })().catch((e) => { label.textContent = String(e); });
 
-        // Babylon edits travel back: a box made with Babylon's API, tracked, synced.
-        const box = BABYLON.MeshBuilder.CreateBox("babylon_box", { size: 1.5 }, scene);
-        box.position.set(3, 0.75, 0);
-        side.track([box]);
-        const { sent, received } = await project.sync();
-        console.log(`sync: sent ${sent.length}, received ${received.length}`);
-    })().catch(console.error);
+    // Babylon edits: move what you click, then sync (only that change crosses).
+    scene.onPointerObservable.add(async (info) => {
+        if (info.type !== BABYLON.PointerEventTypes.POINTERTAP) return;
+        const node = side.entityOf(info.pickInfo?.pickedMesh ?? null);
+        if (!node) return;
+        node.position.y += 0.5;
+        const { sent } = await project.sync();
+        label.textContent = `synced ${sent.map((c) => c.op).join(", ")} for ${node.name}`;
+    });
 
     return scene;
 };

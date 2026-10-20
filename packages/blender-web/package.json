@@ -1,6 +1,6 @@
 {
   "name": "@knervous/blender-web",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Blender compiled to WebAssembly, embedded in the page: ships the runtime and a core adapter that keeps a Babylon.js, Babylon Lite or three.js scene in sync with a persistent in-tab Blender session.",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -56,10 +56,11 @@
     }
   },
   "bin": {
-    "blender-web": "./dist/runtime/cli.js"
+    "blender-web": "bin/blender-web.js"
   },
   "files": [
     "dist",
+    "bin",
     "runtime",
     "README.md",
     "DESIGN.md",

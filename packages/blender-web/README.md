@@ -139,7 +139,7 @@ file is checked against the runtime's sha256 manifest on install.
   CDN serving the package works as `runtimeUrl`:
 
   ```ts
-  createBlenderSession({ runtimeUrl: "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.1/runtime/" });
+  createBlenderSession({ runtimeUrl: "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/" });
   ```
 
   A CDN sends the `.br` files as plain bytes (browsers decode brotli only as

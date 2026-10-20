@@ -113,9 +113,10 @@ async function fetchCounted(url: string, size: number | undefined, onBytes: (del
   // server compressed it, so prefer the manifest's raw size.
   const encoded = Boolean(response.headers.get("content-encoding"));
   const total = size ?? (encoded ? 0 : Number(response.headers.get("content-length") ?? 0));
-  // A .br file the server sent as plain bytes is decoded here; one it sent
-  // with Content-Encoding arrives decoded already.
-  const body = decoder && !encoded ? response.body.pipeThrough(decoder()) : response.body;
+  // A .br file is brotli whatever the transport: a CDN may compress it again
+  // (jsDelivr answers with Content-Encoding: br), and the browser removes
+  // only that layer. So a requested .br is always decoded here.
+  const body = decoder ? response.body.pipeThrough(decoder()) : response.body;
   const reader = body.getReader();
   const counted = new ReadableStream<Uint8Array>({
     async pull(controller) {
