@@ -1,23 +1,24 @@
 {
-  "name": "@knervous/blender-wasm",
-  "version": "0.1.0",
-  "description": "Blender embedded as WebAssembly: ships the wasm runtime and a project API that keeps a Babylon.js or three.js scene in sync with a persistent in-tab Blender session.",
-  "license": "GPL-2.0-or-later",
-  "type": "module",
+  "name": "@knervous/blender-web",
+  "version": "0.0.1",
+  "description": "Blender compiled to WebAssembly, embedded in the page: ships the runtime and a core adapter that keeps a Babylon.js, Babylon Lite or three.js scene in sync with a persistent in-tab Blender session.",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/knervous/blender-wasm.git",
-    "directory": "packages/blender-wasm"
+    "directory": "packages/blender-web"
   },
   "keywords": [
     "blender",
     "webassembly",
     "wasm",
     "babylonjs",
+    "babylon-lite",
     "threejs",
     "gltf",
     "3d"
   ],
+  "type": "module",
   "exports": {
     ".": {
       "types": "./dist/project/index.d.ts",
@@ -48,16 +49,22 @@
       "default": "./dist/node/index.js"
     },
     "./protocol.py": "./dist/project/protocol.py",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./lite": {
+      "types": "./dist/lite/index.d.ts",
+      "default": "./dist/lite/index.js"
+    }
   },
   "bin": {
-    "blender-wasm": "./dist/runtime/cli.js"
+    "blender-web": "./dist/runtime/cli.js"
   },
   "files": [
     "dist",
+    "runtime",
     "README.md",
     "DESIGN.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-LICENSES.md"
   ],
   "sideEffects": false,
   "engines": {
@@ -66,14 +73,14 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "node scripts/build.mjs --generate-only && tsc -p tsconfig.json --noEmit",
-    "prepack": "npm run build",
+    "prepack": "node scripts/build.mjs --require-runtime",
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "@knervous/blender-wasm-runtime": "0.1.0",
     "@babylonjs/core": ">=8",
     "three": ">=0.160",
-    "vite": ">=5"
+    "vite": ">=5",
+    "@babylonjs/lite": ">=1.33.0"
   },
   "peerDependenciesMeta": {
     "@babylonjs/core": {
@@ -84,11 +91,14 @@
     },
     "vite": {
       "optional": true
+    },
+    "@babylonjs/lite": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@babylonjs/core": "^9.31.0",
-    "@knervous/blender-wasm-runtime": "file:../../dist/blender-wasm-browser",
+    "@babylonjs/lite": "1.36.0",
     "@types/node": "^22.19.0",
     "@types/three": "^0.186.0",
     "three": "^0.186.1",

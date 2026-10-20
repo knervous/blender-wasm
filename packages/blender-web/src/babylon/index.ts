@@ -7,8 +7,6 @@ import { PBRMaterial } from "@babylonjs/core/Materials/PBR/pbrMaterial.js";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial.js";
 import { Color3 } from "@babylonjs/core/Maths/math.color.js";
 import { Quaternion } from "@babylonjs/core/Maths/math.vector.js";
-import { CreateBox, CreateBoxVertexData } from "@babylonjs/core/Meshes/Builders/boxBuilder.js";
-import { CreateSphere, CreateSphereVertexData } from "@babylonjs/core/Meshes/Builders/sphereBuilder.js";
 import { Mesh } from "@babylonjs/core/Meshes/mesh.js";
 import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData.js";
 import { SubMesh } from "@babylonjs/core/Meshes/subMesh.js";
@@ -16,20 +14,28 @@ import { TransformNode } from "@babylonjs/core/Meshes/transformNode.js";
 import type { Node } from "@babylonjs/core/node.js";
 import type { Scene } from "@babylonjs/core/scene.js";
 import type {
-  Change, EngineSide, EntityKind, EntityState, Field, MaterialAssignment, MaterialState, MeshData, Primitive, Rgba,
+  Change, EngineSide, EntityKind, EntityState, Field, MaterialAdapter, MaterialAssignment, MaterialState, MeshData,
   Transform,
 } from "../project/index.ts";
 
 /**
- * Babylon.js side of a project (`@knervous/blender-wasm/babylon`).
+ * Babylon.js side of a project (`@knervous/blender-web/babylon`): the core
+ * adapter between Babylon nodes and the shared description.
  *
- * Every project entity lives under one root that turns Y 180° and mirrors Z, so node values are
- * the shared description's glTF-space values unchanged (the same trick as
- * Babylon's glTF loader). Project meshes keep glTF's counter-clockwise winding
- * and are oriented the way that loader orients them, so a mesh crosses as-is.
+ * It reads the scene as Babylon holds it. Move a node, set `mesh.material`,
+ * change a PBRMaterial's colour, or dispose a node with Babylon's own API,
+ * and the next sync carries it. It writes what Blender changed back the same
+ * way. Editing tools are left to the app.
+ *
+ * Every project entity lives under one root that turns Y 180° and mirrors Z,
+ * so node values are the shared description's glTF-space values unchanged.
+ * That is the root Babylon's glTF loader builds, so loaded glTF content keeps
+ * its coordinates. Project meshes keep glTF's counter-clockwise winding and
+ * are oriented the way that loader orients them, so a mesh crosses as-is.
  *
  * Field adapters translate each field between a node and the shared
- * description; pass replacements to customise one.
+ * description; the material adapter does the same for material properties.
+ * Pass replacements to customise either.
  */
 export interface FieldAdapter<V> {
   read(node: TransformNode, side: BabylonSide): V;
@@ -39,12 +45,13 @@ export interface FieldAdapter<V> {
 export type FieldAdapters = { [F in Field]: FieldAdapter<EntityState[F]> };
 
 interface EntityMetadata {
-  bwId: string;
-  bwKind: EntityKind;
-  bwMaterials: (string | null)[];
+  bwId?: string;
+  bwKind?: EntityKind;
+  /** The slot list last written or read, for slot count when no material is set. */
+  bwMaterials?: (string | null)[];
 }
 
-const metadataOf = (node: Node): Partial<EntityMetadata> & { markerFor?: string } => node.metadata ?? {};
+const metadataOf = (node: Node): EntityMetadata => node.metadata ?? {};
 
 export const defaultAdapters: FieldAdapters = {
   name: {
@@ -75,22 +82,65 @@ export const defaultAdapters: FieldAdapters = {
     write: (node, value) => node.setEnabled(value),
   },
   materials: {
-    read: (node) => metadataOf(node).bwMaterials ?? [],
-    write: (node, value, side) => side.assignMaterials(node, value),
+    read: (node, side) => side.slotsOf(node),
+    write: (node, value, side) => side.assignSlots(node, value),
   },
 };
 
-export class BabylonSide implements EngineSide<TransformNode> {
+/**
+ * PBRMaterial and StandardMaterial both read and write (Standard has no
+ * metallic, and its roughness maps to specularPower). Other materials read
+ * as a neutral default and are left alone on write.
+ */
+export const defaultMaterialAdapter: MaterialAdapter<Material> = {
+  read(material) {
+    if (material instanceof PBRMaterial) {
+      const c = material.albedoColor;
+      return { color: [c.r, c.g, c.b, material.alpha], metallic: material.metallic ?? 0, roughness: material.roughness ?? 0.5 };
+    }
+    if (material instanceof StandardMaterial) {
+      const c = material.diffuseColor;
+      return { color: [c.r, c.g, c.b, material.alpha], metallic: 0, roughness: 1 - Math.min(1, material.specularPower / 128) };
+    }
+    return { color: [0.8, 0.8, 0.8, material.alpha], metallic: 0, roughness: 0.5 };
+  },
+  write(material, state) {
+    if (material instanceof PBRMaterial) {
+      material.albedoColor = new Color3(state.color[0], state.color[1], state.color[2]);
+      material.metallic = state.metallic;
+      material.roughness = state.roughness;
+    } else if (material instanceof StandardMaterial) {
+      material.diffuseColor = new Color3(state.color[0], state.color[1], state.color[2]);
+      material.specularPower = (1 - state.roughness) * 128;
+    } else {
+      return;
+    }
+    material.alpha = state.color[3];
+  },
+};
+
+export interface BabylonSideOptions {
+  adapters?: Partial<FieldAdapters>;
+  materialAdapter?: MaterialAdapter<Material>;
+  /** Makes the material for a name Blender introduces (default: a PBRMaterial). */
+  createMaterial?: (name: string, scene: Scene) => Material;
+}
+
+export class BabylonSide implements EngineSide<TransformNode, Material> {
   readonly root: TransformNode;
   private readonly entities = new Map<string, TransformNode>();
-  private readonly materials = new Map<string, PBRMaterial>();
-  private readonly materialStates = new Map<string, MaterialState>();
+  /** Project materials by name: Blender's, and those tracked meshes use. */
+  private readonly materials = new Map<string, Material>();
   private readonly adapters: FieldAdapters;
+  private readonly materialAdapter: MaterialAdapter<Material>;
+  private readonly createMaterial: (name: string, scene: Scene) => Material;
 
-  constructor(readonly scene: Scene, options: { adapters?: Partial<FieldAdapters> } = {}) {
+  constructor(readonly scene: Scene, options: BabylonSideOptions = {}) {
     this.adapters = { ...defaultAdapters, ...options.adapters };
+    this.materialAdapter = options.materialAdapter ?? defaultMaterialAdapter;
+    this.createMaterial = options.createMaterial ?? ((name, s) => new PBRMaterial(name, s));
     // Exactly the root Babylon's glTF loader builds in a left-handed scene, so a
-    // project looks as the same file would through that loader, and adopted
+    // project looks as the same file would through that loader, and loaded
     // glTF content keeps its own coordinates.
     this.root = new TransformNode("project-root", scene);
     this.root.rotationQuaternion = new Quaternion(0, 1, 0, 0);
@@ -99,30 +149,36 @@ export class BabylonSide implements EngineSide<TransformNode> {
 
   // --- lookups ------------------------------------------------------------------
   node(id: string): TransformNode | undefined {
-    return this.entities.get(id);
+    const node = this.entities.get(id);
+    return node && this.alive(node) ? node : undefined;
   }
 
   idOf(node: TransformNode | null): string | null {
     const id = node ? metadataOf(node).bwId : undefined;
-    return id && this.entities.has(id) ? id : null;
+    return id && this.node(id) === node ? id : null;
   }
 
-  /** The entity a picked mesh belongs to (through markers and sub-nodes), if any. */
   entityOf(node: TransformNode | null): TransformNode | null {
     for (let n: Node | null = node; n && n !== this.root; n = n.parent) {
-      const meta = metadataOf(n);
-      const id = meta.markerFor ?? meta.bwId;
-      if (id && this.entities.has(id)) return this.entities.get(id) ?? null;
+      const id = metadataOf(n).bwId;
+      const entity = id ? this.node(id) : undefined;
+      if (entity === n) return entity;
     }
     return null;
   }
 
   ids(): string[] {
+    this.prune();
     return [...this.entities.keys()];
+  }
+
+  material(name: string): Material | undefined {
+    return this.materials.get(name);
   }
 
   // --- SceneSide ------------------------------------------------------------------
   read(): Record<string, EntityState> {
+    this.prune();
     const out: Record<string, EntityState> = {};
     for (const [id, node] of this.entities) {
       out[id] = {
@@ -139,19 +195,22 @@ export class BabylonSide implements EngineSide<TransformNode> {
   }
 
   readMaterials(): Record<string, MaterialState> {
-    return Object.fromEntries(this.materialStates);
+    return Object.fromEntries([...this.materials].map(([name, m]) => [name, this.materialAdapter.read(m)]));
   }
 
   meshData(id: string): MeshData | null {
-    const node = this.entities.get(id);
+    const node = this.node(id);
     return node instanceof Mesh ? readMesh(node) : null;
   }
 
   materialsOf(id: string): MaterialAssignment[] {
-    const node = this.entities.get(id);
-    return (node ? this.adapters.materials.read(node, this) : [])
+    const node = this.node(id);
+    return (node ? this.slotsOf(node) : [])
       .filter((name): name is string => Boolean(name))
-      .map((name) => ({ name, props: this.materialStates.get(name) }));
+      .map((name) => {
+        const material = this.materials.get(name);
+        return { name, props: material ? this.materialAdapter.read(material) : undefined };
+      });
   }
 
   apply(changes: Change[]): void {
@@ -167,78 +226,59 @@ export class BabylonSide implements EngineSide<TransformNode> {
     }
     for (const change of changes) {
       if (change.op === "update") {
-        const node = this.entities.get(change.id);
+        const node = this.node(change.id);
         if (node) this.writeField(node, change.field, change.value);
       } else if (change.op === "geometry") {
         this.replaceGeometry(change.id, change.mesh);
       } else if (change.op === "delete") {
-        this.remove(change.id);
+        this.node(change.id)?.dispose(false, false);
+        this.prune();
       }
     }
   }
 
-  // --- editing from Babylon --------------------------------------------------------
-  /** A new mesh entity made on the Babylon side; it reaches Blender on the next sync. */
-  createPrimitive(kind: Primitive, options: { name?: string; color?: Rgba } = {}): Mesh {
-    const data = kind === "box" ? CreateBoxVertexData({ size: 1 }) : CreateSphereVertexData({ diameter: 1, segments: 16 });
-    const id = newId();
-    const mesh = this.buildMesh(options.name ?? `${kind}_${id.slice(0, 4)}`, canonicalFromVertexData(data));
-    this.register(mesh, id, "mesh");
-    mesh.parent = this.root;
-    const color = options.color ?? [0.31, 0.64, 0.88, 1];
-    const name = `material_${new Color3(color[0], color[1], color[2]).toHexString().slice(1).toLowerCase()}`;
-    this.upsertMaterial(name, { color, metallic: 0, roughness: 0.6 });
-    this.assignMaterials(mesh, [name]);
-    return mesh;
-  }
-
-  /**
-   * Brings untracked Babylon content (a loaded .babylon, USD, ...) into the
-   * project: reparented under the root keeping its world placement, meshes
-   * rewritten to glTF winding, materials turned into project materials.
-   */
-  adopt(nodes: TransformNode[]): string[] {
+  // --- tracking engine content ---------------------------------------------------
+  track(nodes: TransformNode[]): string[] {
     const ids: string[] = [];
     const visit = (node: TransformNode): void => {
-      const id = newId();
-      if (node instanceof Mesh && node.getTotalVertices() > 0) {
-        const data = VertexData.ExtractFromMesh(node);
-        const canonical = canonicalFromVertexData(data);
-        applyMesh(node, canonical);
-        const source = node.material;
-        const name = source?.name || `adopted_${id.slice(0, 4)}`;
-        this.upsertMaterial(name, materialStateOf(source));
-        this.register(node, id, "mesh");
-        this.assignMaterials(node, [name]);
-      } else {
-        this.register(node, id, "empty");
+      if (!this.idOf(node)) {
+        const id = newId();
+        if (node instanceof Mesh && node.getTotalVertices() > 0) {
+          applyMesh(node, canonicalFromVertexData(VertexData.ExtractFromMesh(node)));
+          this.register(node, id, "mesh");
+          metadataOf(node).bwMaterials = this.slotsOf(node);
+        } else {
+          this.register(node, id, "empty");
+        }
+        ids.push(id);
       }
-      ids.push(id);
       for (const child of node.getChildren((c): c is TransformNode => c instanceof TransformNode, true)) visit(child);
     };
-    // Loader handedness roots (glTF's __root__) are not content: adopt through them.
+    // Loader handedness roots (glTF's __root__) are not content: track through them.
     const content = nodes.flatMap((node) => node.name === "__root__"
       ? node.getChildren((c): c is TransformNode => c instanceof TransformNode, true)
       : [node]);
     for (const node of content) {
-      node.setParent(this.root);
+      if (!node.isDescendantOf(this.root)) node.setParent(this.root);
       visit(node);
     }
     for (const node of nodes) if (node.name === "__root__" && node.getChildren().length === 0) node.dispose();
     return ids;
   }
 
-  /** Removes an entity and every entity under it; the next sync deletes them in Blender. */
-  remove(id: string): void {
-    const node = this.entities.get(id);
-    if (!node) return;
-    for (const [otherId, other] of this.entities) {
-      if (other === node || other.isDescendantOf(node)) this.entities.delete(otherId);
-    }
-    node.dispose(false, false);
+  // --- materials -------------------------------------------------------------------
+  /** The slot list of a node, as material names (registering materials it meets). */
+  slotsOf(node: TransformNode): (string | null)[] {
+    const recorded = metadataOf(node).bwMaterials ?? [];
+    if (!(node instanceof Mesh)) return recorded;
+    const material = node.material;
+    if (!material) return recorded.map(() => null);
+    if (material instanceof MultiMaterial) return material.subMaterials.map((m) => (m ? this.nameOf(m) : null));
+    return [this.nameOf(material)];
   }
 
-  assignMaterials(node: TransformNode, names: (string | null)[]): void {
+  /** Puts materials on a node's slots by project name. */
+  assignSlots(node: TransformNode, names: (string | null)[]): void {
     const meta = metadataOf(node);
     meta.bwMaterials = [...names];
     node.metadata = meta;
@@ -248,12 +288,46 @@ export class BabylonSide implements EngineSide<TransformNode> {
       node.material = materials[0] ?? null;
       return;
     }
-    const multi = new MultiMaterial(`${node.name}_slots`, this.scene);
+    const multi = node.material instanceof MultiMaterial ? node.material : new MultiMaterial(`${node.name}_slots`, this.scene);
     multi.subMaterials = materials;
     node.material = multi;
   }
 
+  /**
+   * A material's project name, registering it on first sight. An unnamed
+   * material gets a name; one named like a different material is renamed
+   * `name.001` (Blender's convention), since names are the identity.
+   */
+  private nameOf(material: Material): string {
+    if (material.name && this.materials.get(material.name) === material) return material.name;
+    let name = material.name || `material_${newId().slice(0, 6)}`;
+    for (let n = 1; this.materials.has(name) && this.materials.get(name) !== material; n++) {
+      name = `${material.name}.${String(n).padStart(3, "0")}`;
+    }
+    material.name = name;
+    this.materials.set(name, material);
+    return name;
+  }
+
+  private upsertMaterial(name: string, state: MaterialState): void {
+    let material = this.materials.get(name);
+    if (!material) {
+      material = this.createMaterial(name, this.scene);
+      this.materials.set(name, material);
+    }
+    this.materialAdapter.write(material, state);
+  }
+
   // --- internals ------------------------------------------------------------------
+  private alive(node: TransformNode): boolean {
+    return !node.isDisposed() && node.isDescendantOf(this.root);
+  }
+
+  /** Forgets entities whose nodes were disposed or moved out of the project. */
+  private prune(): void {
+    for (const [id, node] of this.entities) if (!this.alive(node)) this.entities.delete(id);
+  }
+
   private writeField(node: TransformNode, field: Field, value: unknown): void {
     switch (field) {
       case "name": return this.adapters.name.write(node, String(value), this);
@@ -273,8 +347,8 @@ export class BabylonSide implements EngineSide<TransformNode> {
     const node = entity.kind === "mesh" && mesh
       ? this.buildMesh(entity.name, mesh)
       : new TransformNode(entity.name, this.scene);
+    node.parent = this.root;
     this.register(node, entity.id, entity.kind);
-    if (entity.kind === "light" || entity.kind === "camera") this.addMarker(node, entity);
     this.adapters.name.write(node, entity.name, this);
     this.adapters.transform.write(node, entity.transform, this);
     this.adapters.visible.write(node, entity.visible, this);
@@ -288,11 +362,11 @@ export class BabylonSide implements EngineSide<TransformNode> {
   }
 
   private replaceGeometry(id: string, mesh: MeshData): void {
-    const node = this.entities.get(id);
+    const node = this.node(id);
     if (!node) return;
     if (node instanceof Mesh) {
       applyMesh(node, mesh);
-      this.assignMaterials(node, metadataOf(node).bwMaterials ?? []);
+      this.assignSlots(node, metadataOf(node).bwMaterials ?? []);
       return;
     }
     // An empty that became a mesh: swap the node, keep children and fields.
@@ -302,48 +376,11 @@ export class BabylonSide implements EngineSide<TransformNode> {
     replacement.position.copyFrom(node.position);
     replacement.rotationQuaternion = node.rotationQuaternion?.clone() ?? Quaternion.FromEulerVector(node.rotation);
     replacement.scaling.copyFrom(node.scaling);
+    replacement.setEnabled(node.isEnabled(false));
     for (const child of node.getChildren()) child.parent = replacement;
     this.entities.set(id, replacement);
     node.dispose(true);
-  }
-
-  /** Edit a material's properties (or create it); every entity using it changes. */
-  setMaterial(name: string, state: MaterialState): void {
-    this.upsertMaterial(name, state);
-  }
-
-  materialNames(): string[] {
-    return [...this.materialStates.keys()].sort();
-  }
-
-  materialState(name: string): MaterialState | undefined {
-    return this.materialStates.get(name);
-  }
-
-  private upsertMaterial(name: string, state: MaterialState): void {
-    let material = this.materials.get(name);
-    if (!material) {
-      material = new PBRMaterial(name, this.scene);
-      this.materials.set(name, material);
-    }
-    material.albedoColor = new Color3(state.color[0], state.color[1], state.color[2]);
-    material.alpha = state.color[3];
-    material.metallic = state.metallic;
-    material.roughness = state.roughness;
-    this.materialStates.set(name, state);
-  }
-
-  private addMarker(node: TransformNode, entity: EntityState): void {
-    const marker = entity.kind === "light"
-      ? CreateSphere(`${entity.name}_marker`, { diameter: 0.3, segments: 8 }, this.scene)
-      : CreateBox(`${entity.name}_marker`, { width: 0.5, height: 0.35, depth: 0.25 }, this.scene);
-    const material = new StandardMaterial(`${entity.name}_marker`, this.scene);
-    material.emissiveColor = entity.kind === "light" ? new Color3(1, 0.85, 0.3) : new Color3(0.6, 0.6, 0.65);
-    material.disableLighting = true;
-    material.wireframe = entity.kind === "camera";
-    marker.material = material;
-    marker.parent = node;
-    marker.metadata = { markerFor: entity.id };
+    this.assignSlots(replacement, metadataOf(replacement).bwMaterials ?? []);
   }
 }
 
@@ -443,16 +480,3 @@ function readMesh(node: Mesh): MeshData | null {
   }
   return out;
 }
-
-function materialStateOf(material: Material | null): MaterialState {
-  if (material instanceof PBRMaterial) {
-    const c = material.albedoColor;
-    return { color: [c.r, c.g, c.b, material.alpha], metallic: material.metallic ?? 0, roughness: material.roughness ?? 0.5 };
-  }
-  if (material instanceof StandardMaterial) {
-    const c = material.diffuseColor;
-    return { color: [c.r, c.g, c.b, material.alpha], metallic: 0, roughness: 1 - Math.min(1, material.specularPower / 128) };
-  }
-  return { color: [0.8, 0.8, 0.8, 1], metallic: 0, roughness: 0.5 };
-}
-

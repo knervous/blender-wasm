@@ -15,9 +15,9 @@ import {
   type AssetContainer, type TransformNode,
 } from "@babylonjs/core";
 import "@babylonjs/loaders";
-import { Project, type BlenderRunner, type BlenderSession } from "@knervous/blender-wasm";
-import { createBlenderRunner, createBlenderSession, runtimeInstalled } from "@knervous/blender-wasm/browser";
-import { BabylonSide } from "@knervous/blender-wasm/babylon";
+import { Project, type BlenderRunner, type BlenderSession } from "@knervous/blender-web";
+import { createBlenderRunner, createBlenderSession, runtimeInstalled } from "@knervous/blender-web/browser";
+import { BabylonSide } from "@knervous/blender-web/babylon";
 
 const requested = new URLSearchParams(location.search).get("mode");
 const mode = requested === "legacy" || requested === "session" ? requested : "sdk";

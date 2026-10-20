@@ -1,6 +1,6 @@
 import {
-  Color, DirectionalLight, GridHelper, HemisphereLight, Mesh, MeshStandardMaterial, Object3D, PerspectiveCamera,
-  Raycaster, SRGBColorSpace, Scene, Vector2, WebGLRenderer,
+  BoxGeometry, Color, DirectionalLight, GridHelper, HemisphereLight, Mesh, MeshBasicMaterial, MeshStandardMaterial,
+  Object3D, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, SphereGeometry, Vector2, WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -8,7 +8,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
-import { ThreeSide } from "@knervous/blender-wasm/three";
+import { ThreeSide, defaultMaterialAdapter } from "@knervous/blender-web/three";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
 export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3D> & { scene: Scene } {
@@ -29,6 +29,8 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
   scene.add(grid);
 
   const side = new ThreeSide(scene);
+  /** Materials made here and not yet on a tracked mesh (so not yet project materials). */
+  const created = new Map<string, MeshStandardMaterial>();
   /** Content loaded into three.js outside the project (until adopted). */
   let untracked: Object3D[] = [];
   const untrackedRootOf = (node: Object3D | null): Object3D | null => {
@@ -126,7 +128,7 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
       return untracked;
     },
     adoptUntracked() {
-      const ids = side.adopt(untracked);
+      const ids = side.track(untracked);
       untracked = [];
       return ids;
     },
@@ -134,6 +136,52 @@ export function createThreeViewport(canvas: HTMLCanvasElement): Viewport<Object3
       node.removeFromParent();
       node.traverse((n) => { if (n instanceof Mesh) n.geometry.dispose(); });
       untracked = untracked.filter((n) => n !== node);
+    },
+    addPrimitive(kind, color) {
+      const name = `${kind}_${Math.random().toString(16).slice(2, 6)}`;
+      const material = new MeshStandardMaterial({ name: `${name}_material` });
+      defaultMaterialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
+      const mesh = new Mesh(kind === "box" ? new BoxGeometry(1, 1, 1) : new SphereGeometry(0.5, 32, 16), material);
+      mesh.name = name;
+      scene.add(mesh);
+      side.track([mesh]);
+      return mesh;
+    },
+    deleteNode(node) {
+      node.removeFromParent();
+      node.traverse((n) => { if (n instanceof Mesh) n.geometry.dispose(); });
+      untracked = untracked.filter((n) => n !== node);
+    },
+    assignMaterial(node, name) {
+      if (!(node instanceof Mesh)) return;
+      const material = (name && (side.material(name) ?? created.get(name))) || side.emptySlot;
+      if (Array.isArray(node.material)) node.material = [material, ...node.material.slice(1)];
+      else node.material = material;
+    },
+    createMaterial(name, state) {
+      const material = new MeshStandardMaterial({ name });
+      defaultMaterialAdapter.write(material, state);
+      created.set(material.name, material);
+      return material.name;
+    },
+    editMaterial(name, state) {
+      const material = side.material(name);
+      if (material) defaultMaterialAdapter.write(material, state);
+    },
+    decorate() {
+      for (const [id, entity] of Object.entries(side.read())) {
+        if (entity.kind !== "light" && entity.kind !== "camera") continue;
+        const node = side.node(id);
+        if (!node || node.children.some((c) => c.userData.marker)) continue;
+        const light = entity.kind === "light";
+        const marker = new Mesh(
+          light ? new SphereGeometry(0.15, 12, 8) : new BoxGeometry(0.5, 0.35, 0.25),
+          new MeshBasicMaterial({ color: light ? 0xffd94d : 0x999aa6, wireframe: !light }),
+        );
+        marker.name = `${entity.name}_marker`;
+        marker.userData = { marker: true };
+        node.add(marker);
+      }
     },
     async exportNative() {
       const glb = await new GLTFExporter().parseAsync([side.root, ...untracked], { binary: true });

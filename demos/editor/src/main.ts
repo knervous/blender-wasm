@@ -2,7 +2,7 @@
 /* A Babylon.js or three.js editor and Blender (WebAssembly, in this tab) as one
  * working project.
  *
- * @knervous/blender-wasm keeps the project: a stable id per object, the last
+ * @knervous/blender-web keeps the project: a stable id per object, the last
  * state both sides agreed on, and a sync that sends only the engine's edits
  * since then and applies only what Blender changed. Its engine adapters
  * (`/babylon`, `/three`) translate for each engine; this file is the editor UI,
@@ -14,8 +14,8 @@
  */
 import {
   BLENDER_IMPORTS, Project, ProjectRunError, type Change, type Conflict, type ProjectPlugin, type Rgba, type SyncResult,
-} from "@knervous/blender-wasm";
-import { createBlenderSession, runtimeInstalled, type BootProgress } from "@knervous/blender-wasm/browser";
+} from "@knervous/blender-web";
+import { createBlenderSession, runtimeInstalled, type BootProgress } from "@knervous/blender-web/browser";
 import { hexToLinear, linearToHex, type GizmoMode, type Viewport } from "./viewport.ts";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string, type?: new () => T): T => {
@@ -96,6 +96,7 @@ function editor<N extends object>(view: Viewport<N>): void {
       console.error(error);
     } finally {
       busy = false;
+      view.decorate();
       actionButtons().forEach((b) => { b.disabled = b.title.startsWith("Not installed"); });
       refresh();
     }
@@ -196,9 +197,10 @@ function editor<N extends object>(view: Viewport<N>): void {
     matPanel.hidden = !entity || entity.kind !== "mesh";
     if (!entity || matPanel.hidden) return;
     const current = entity.materials[0] ?? "";
-    matName.replaceChildren(new Option("(none)", ""), ...side.materialNames().map((n) => new Option(n, n)));
+    const materials = side.readMaterials();
+    matName.replaceChildren(new Option("(none)", ""), ...Object.keys(materials).sort().map((n) => new Option(n, n)));
     matName.value = current;
-    const state = current ? side.materialState(current) : undefined;
+    const state = current ? materials[current] : undefined;
     for (const input of [matColor, matMetallic, matRoughness]) input.disabled = !state;
     if (!state) return;
     matColor.value = linearToHex(state.color);
@@ -209,18 +211,16 @@ function editor<N extends object>(view: Viewport<N>): void {
   function assignSlot0(name: string | null): void {
     const entity = selectedEntity();
     if (!entity || !selected) return;
-    const slots = entity.materials.length ? [...entity.materials] : [null];
-    slots[0] = name;
-    side.assignMaterials(selected, slots);
+    view.assignMaterial(selected, name);
     refresh();
     scheduleAutoSync();
   }
 
   function editMaterial(): void {
     const name = matName.value;
-    const state = name ? side.materialState(name) : undefined;
+    const state = name ? side.readMaterials()[name] : undefined;
     if (!state) return;
-    side.setMaterial(name, {
+    view.editMaterial(name, {
       color: [...hexToLinear(matColor.value), state.color[3]],
       metallic: Number(matMetallic.value),
       roughness: Number(matRoughness.value),
@@ -231,8 +231,7 @@ function editor<N extends object>(view: Viewport<N>): void {
   matName.onchange = () => assignSlot0(matName.value || null);
   $("mat-new").onclick = () => {
     const name = `material_${++newMaterialCount}`;
-    side.setMaterial(name, { color: [0.6, 0.6, 0.6, 1], metallic: 0, roughness: 0.5 });
-    assignSlot0(name);
+    assignSlot0(view.createMaterial(name, { color: [0.6, 0.6, 0.6, 1], metallic: 0, roughness: 0.5 }));
   };
   for (const input of [matColor, matMetallic, matRoughness]) {
     input.addEventListener("input", editMaterial);
@@ -356,7 +355,7 @@ function editor<N extends object>(view: Viewport<N>): void {
   });
 
   const addPrimitive = (kind: "box" | "sphere", color: Rgba): void => {
-    select(side.createPrimitive(kind, { color }));
+    select(view.addPrimitive(kind, color));
     scheduleAutoSync();
   };
 
@@ -373,7 +372,7 @@ function editor<N extends object>(view: Viewport<N>): void {
     const node = selected;
     select(null);
     const id = side.idOf(node);
-    if (id) side.remove(id);
+    if (id) view.deleteNode(node);
     else view.disposeUntracked(node);
     refresh();
     scheduleAutoSync();

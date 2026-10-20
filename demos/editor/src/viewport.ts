@@ -1,15 +1,18 @@
-import type { EngineSide } from "@knervous/blender-wasm";
+import type { EngineSide, MaterialState, Rgba } from "@knervous/blender-web";
 
 export type GizmoMode = "position" | "rotation" | "scale";
 
 /**
- * What the editor needs from an engine: its project side (the package's
- * adapter), a camera and gizmos, picking, and content loaded outside the
- * project. `N` is the engine's node type.
+ * What the editor needs from an engine: the package's core adapter for it,
+ * plus the editing tools the package leaves to apps: a camera and gizmos,
+ * picking, primitives, material edits, markers for Blender's lights and
+ * cameras, and content loaded outside the project. All of it uses the
+ * engine's own API; the adapter reads the result on the next sync.
+ * `N` is the engine's node type.
  */
 export interface Viewport<N> {
   readonly engine: string;
-  readonly side: EngineSide<N>;
+  readonly side: EngineSide<N, unknown>;
   /** Formats the engine opens by itself (outside the project). */
   readonly formats: string[];
   /** The download the engine makes of its own scene. */
@@ -29,6 +32,18 @@ export interface Viewport<N> {
   /** Deletes an untracked node. */
   disposeUntracked(node: N): void;
   exportNative(): Promise<BlobPart>;
+  /** A new mesh with its own material, tracked into the project. */
+  addPrimitive(kind: "box" | "sphere", color: Rgba): N;
+  /** Deletes a node with the engine's API (an entity's deletion syncs). */
+  deleteNode(node: N): void;
+  /** Puts a project material (or none) on a mesh's first slot. */
+  assignMaterial(node: N, name: string | null): void;
+  /** A new engine material; returns its name. */
+  createMaterial(name: string, state: MaterialState): string;
+  /** Edits a project material's properties on the engine material. */
+  editMaterial(name: string, state: MaterialState): void;
+  /** Markers for entities the engine does not draw (Blender's lights and cameras). */
+  decorate(): void;
 }
 
 /* Linear (glTF, Principled BSDF) colour <-> the sRGB hex a colour picker shows. */

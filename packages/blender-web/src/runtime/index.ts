@@ -1,8 +1,8 @@
 /**
  * Puts the browser runtime where pages are served (Node, build time).
  *
- * The binaries ship in @knervous/blender-wasm-runtime (a peer dependency),
- * brotli-compressed. A served runtime directory holds:
+ * The binaries ship in this package's runtime/ directory, brotli-compressed.
+ * A served runtime directory holds:
  *
  *   blender.js            emscripten glue, unmodified (pthread workers load it)
  *   blender.wasm          inflated, for servers that do not negotiate encodings
@@ -11,19 +11,20 @@
  *   blender.data.br
  *   session-worker.js     this package's workers (classic: they importScripts
  *   run-worker.js         the glue)
+ *   LICENSE, THIRD-PARTY-LICENSES.md
  *   manifest.json         written last: its presence means the copy is complete
  *
  * Every file is checked against the runtime manifest's sha256.
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 
-export const RUNTIME_PACKAGE = "@knervous/blender-wasm-runtime";
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** The runtime shipped in this package (dist/runtime/ -> runtime/). */
+export const PACKAGED_RUNTIME = resolve(HERE, "../../runtime");
 const WORKERS = ["session-worker.js", "run-worker.js"];
 
 interface FileDigest { bytes: number; sha256: string }
@@ -39,19 +40,13 @@ export interface RuntimePackageManifest {
 
 const sha256 = (data: Uint8Array): string => createHash("sha256").update(data).digest("hex");
 
-/**
- * The installed runtime package's directory. Looks from `from` (a project
- * root; the app's own node_modules first), then from this package.
- */
-export function resolveRuntimeDir(options: { from?: string; runtimeDir?: string } = {}): string {
-  if (options.runtimeDir) return resolve(options.runtimeDir);
-  const bases = [options.from && join(resolve(options.from), "package.json"), import.meta.url].filter(Boolean);
-  for (const base of bases) {
-    try {
-      return dirname(createRequire(String(base)).resolve(`${RUNTIME_PACKAGE}/manifest.json`));
-    } catch { /* next */ }
+/** The runtime directory to install from: `runtimeDir`, else the one in this package. */
+export function resolveRuntimeDir(options: { runtimeDir?: string } = {}): string {
+  const dir = options.runtimeDir ? resolve(options.runtimeDir) : PACKAGED_RUNTIME;
+  if (!existsSync(join(dir, "manifest.json"))) {
+    throw new Error(`no Blender runtime in ${dir}${options.runtimeDir ? "" : " (a source checkout: run ./build.sh browser, then npm run build)"}`);
   }
-  throw new Error(`${RUNTIME_PACKAGE} is not installed (npm install ${RUNTIME_PACKAGE}), or pass runtimeDir`);
+  return dir;
 }
 
 export function readRuntimeManifest(runtimeDir: string): RuntimePackageManifest {
@@ -61,9 +56,8 @@ export function readRuntimeManifest(runtimeDir: string): RuntimePackageManifest 
 export interface InstallOptions {
   /** The directory to fill (e.g. public/blender-runtime). */
   dest: string;
-  /** The runtime package's directory; resolved from `from` when omitted. */
+  /** A runtime directory other than the packaged one. */
   runtimeDir?: string;
-  from?: string;
   /** Also write the .br files, for servers that send them with Content-Encoding (default true). */
   compressed?: boolean;
   log?: (line: string) => void;
@@ -77,7 +71,7 @@ export function installRuntime(options: InstallOptions): { dest: string; manifes
   const compressed = options.compressed ?? true;
   const workerSources = WORKERS.map((name) => join(HERE, "../browser", name));
   const stamp = JSON.stringify({ ...manifest, workers: workerSources.map((p) => sha256(readFileSync(p))), compressed });
-  const stampPath = join(dest, ".blender-wasm-stamp");
+  const stampPath = join(dest, ".blender-web-stamp");
   const complete = existsSync(join(dest, "manifest.json")) && existsSync(stampPath)
     && readFileSync(stampPath, "utf8") === stamp
     && Object.entries(manifest.raw).every(([name, d]) => existsSync(join(dest, name)) && statSync(join(dest, name)).size === d.bytes);
@@ -105,7 +99,11 @@ export function installRuntime(options: InstallOptions): { dest: string; manifes
   }
   write("blender.js", read("blender.js"));
   WORKERS.forEach((name, i) => write(name, readFileSync(workerSources[i])));
-  write("LICENSE", read("LICENSE"));
+  // The package's license and notices travel with the served binaries.
+  for (const name of ["LICENSE", "THIRD-PARTY-LICENSES.md"]) {
+    const path = join(HERE, "../..", name);
+    if (existsSync(path)) write(name, readFileSync(path));
+  }
   write("manifest.json", readFileSync(join(runtimeDir, "manifest.json")));
   writeFileSync(stampPath, stamp);
   return { dest, manifest, skipped: false };

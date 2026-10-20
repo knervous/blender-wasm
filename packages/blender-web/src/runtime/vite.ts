@@ -1,13 +1,13 @@
 /**
  * Vite plugin: serves the Blender runtime in dev and emits it on build.
  *
- *   import { blenderWasm } from "@knervous/blender-wasm/vite";
- *   export default { plugins: [blenderWasm()] };
+ *   import { blenderWeb } from "@knervous/blender-web/vite";
+ *   export default { plugins: [blenderWeb()] };
  *
  * - dev and preview get the cross-origin isolation headers (pthreads need
  *   SharedArrayBuffer);
- * - this package and the runtime are kept out of dependency pre-bundling (the
- *   workers and glue must load unmodified);
+ * - this package is kept out of dependency pre-bundling (the workers and
+ *   glue must load unmodified);
  * - `<base>blender-runtime/` is served from a cache under node_modules/.cache
  *   in dev (brotli when the browser accepts it) and written into the build's
  *   outDir, .br copies included, for a server to send with Content-Encoding.
@@ -20,10 +20,10 @@ import { extname, join, normalize, resolve } from "node:path";
 import type { Plugin, ResolvedConfig } from "vite";
 import { CROSS_ORIGIN_ISOLATION, RUNTIME_CONTENT_TYPES, installRuntime } from "./index.ts";
 
-export interface BlenderWasmPluginOptions {
+export interface BlenderWebPluginOptions {
   /** Path under the site's base where the runtime is served (default "blender-runtime/"). */
   path?: string;
-  /** The runtime package's directory, when it is not resolvable from the project. */
+  /** A runtime directory other than the packaged one. */
   runtimeDir?: string;
   /** Add COOP/COEP to dev and preview (default true). */
   isolate?: boolean;
@@ -31,27 +31,27 @@ export interface BlenderWasmPluginOptions {
   compressed?: boolean;
 }
 
-export function blenderWasm(options: BlenderWasmPluginOptions = {}): Plugin {
+export function blenderWeb(options: BlenderWebPluginOptions = {}): Plugin {
   const path = (options.path ?? "blender-runtime/").replace(/^\/+/, "").replace(/\/?$/, "/");
   const isolate = options.isolate ?? true;
   let config: ResolvedConfig;
   return {
-    name: "blender-wasm",
+    name: "blender-web",
     config: () => ({
       server: isolate ? { headers: { ...CROSS_ORIGIN_ISOLATION } } : {},
       preview: isolate ? { headers: { ...CROSS_ORIGIN_ISOLATION } } : {},
-      optimizeDeps: { exclude: ["@knervous/blender-wasm", "@knervous/blender-wasm-runtime"] },
+      optimizeDeps: { exclude: ["@knervous/blender-web"] },
     }),
     configResolved(resolved) {
       config = resolved;
     },
     configureServer(server) {
-      const cache = resolve(config.cacheDir, "blender-wasm-runtime");
+      const cache = resolve(config.cacheDir, "blender-web-runtime");
       const { manifest, skipped } = installRuntime({
-        dest: cache, runtimeDir: options.runtimeDir, from: config.root, compressed: true,
-        log: (line) => config.logger.info(`[blender-wasm] ${line}`),
+        dest: cache, runtimeDir: options.runtimeDir, compressed: true,
+        log: (line) => config.logger.info(`[blender-web] ${line}`),
       });
-      config.logger.info(`[blender-wasm] runtime ${manifest.forkRevision}${skipped ? " (cached)" : ""} at ${config.base}${path}`);
+      config.logger.info(`[blender-web] runtime ${manifest.forkRevision}${skipped ? " (cached)" : ""} at ${config.base}${path}`);
       const prefix = `${config.base}${path}`;
       server.middlewares.use((req, res, next) => {
         const url = (req.url ?? "").split("?")[0];
@@ -77,12 +77,12 @@ export function blenderWasm(options: BlenderWasmPluginOptions = {}): Plugin {
     writeBundle() {
       if (config.command !== "build") return;
       const { dest } = installRuntime({
-        dest: resolve(config.root, config.build.outDir, path), runtimeDir: options.runtimeDir, from: config.root,
+        dest: resolve(config.root, config.build.outDir, path), runtimeDir: options.runtimeDir,
         compressed: options.compressed ?? true,
       });
-      config.logger.info(`[blender-wasm] runtime written to ${dest}`);
+      config.logger.info(`[blender-web] runtime written to ${dest}`);
     },
   };
 }
 
-export default blenderWasm;
+export default blenderWeb;

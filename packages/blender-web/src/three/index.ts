@@ -1,14 +1,21 @@
 import {
-  BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, Group, Light, LinearSRGBColorSpace, Material, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, Object3D, SphereGeometry,
+  BufferAttribute, BufferGeometry, Camera, Color, Group, Light, LinearSRGBColorSpace, Material, Mesh,
+  MeshStandardMaterial, Object3D,
 } from "three";
 import type {
-  Change, EngineSide, EntityKind, EntityState, Field, MaterialAssignment, MaterialState, MeshData, Primitive, Rgba,
+  Change, EngineSide, EntityKind, EntityState, Field, MaterialAdapter, MaterialAssignment, MaterialState, MeshData,
   Transform,
 } from "../project/index.ts";
 
 /**
- * three.js side of a project (`@knervous/blender-wasm/three`).
+ * three.js side of a project (`@knervous/blender-web/three`): the core
+ * adapter between Object3Ds and the shared description.
+ *
+ * It reads the scene as three.js holds it. Move an object, set
+ * `mesh.material`, change a material's colour, or remove an object from the
+ * project root with three.js's own API, and the next sync carries it. It
+ * writes what Blender changed back the same way. Editing tools are left to
+ * the app.
  *
  * three.js is Y up, right handed and counter-clockwise, as glTF is, so the
  * project root is an identity Group and node values are the shared
@@ -16,7 +23,8 @@ import type {
  * as GLTFLoader leaves them; textures on them want `flipY = false`.
  *
  * Field adapters translate each field between an Object3D and the shared
- * description; pass replacements to customise one.
+ * description; the material adapter does the same for material properties.
+ * Pass replacements to customise either.
  */
 export interface FieldAdapter<V> {
   read(node: Object3D, side: ThreeSide): V;
@@ -28,8 +36,8 @@ export type FieldAdapters = { [F in Field]: FieldAdapter<EntityState[F]> };
 interface EntityData {
   bwId?: string;
   bwKind?: EntityKind;
+  /** The slot list last written or read, for slot count on non-meshes. */
   bwMaterials?: (string | null)[];
-  markerFor?: string;
 }
 
 const dataOf = (node: Object3D): EntityData => node.userData;
@@ -60,52 +68,100 @@ export const defaultAdapters: FieldAdapters = {
     write: (node, value) => { node.visible = value; },
   },
   materials: {
-    read: (node) => dataOf(node).bwMaterials ?? [],
-    write: (node, value, side) => side.assignMaterials(node, value),
+    read: (node, side) => side.slotsOf(node),
+    write: (node, value, side) => side.assignSlots(node, value),
   },
 };
 
-export class ThreeSide implements EngineSide<Object3D> {
+const numberOf = (material: Material, key: string): number | undefined => {
+  const value = Reflect.get(material, key);
+  return typeof value === "number" ? value : undefined;
+};
+
+/**
+ * Any material with a `color` reads and writes it (linear, three's working
+ * space), plus `metalness` and `roughness` where it has them
+ * (MeshStandardMaterial, MeshPhysicalMaterial). Opacity is the alpha.
+ */
+export const defaultMaterialAdapter: MaterialAdapter<Material> = {
+  read(material) {
+    const color = Reflect.get(material, "color");
+    const c = color instanceof Color ? color : new Color(0.8, 0.8, 0.8);
+    return {
+      color: [c.r, c.g, c.b, material.opacity],
+      metallic: numberOf(material, "metalness") ?? 0,
+      roughness: numberOf(material, "roughness") ?? 0.5,
+    };
+  },
+  write(material, state) {
+    const color = Reflect.get(material, "color");
+    if (color instanceof Color) color.setRGB(state.color[0], state.color[1], state.color[2], LinearSRGBColorSpace);
+    if (numberOf(material, "metalness") !== undefined) Reflect.set(material, "metalness", state.metallic);
+    if (numberOf(material, "roughness") !== undefined) Reflect.set(material, "roughness", state.roughness);
+    material.opacity = state.color[3];
+    material.transparent = state.color[3] < 1;
+    material.needsUpdate = true;
+  },
+};
+
+export interface ThreeSideOptions {
+  adapters?: Partial<FieldAdapters>;
+  materialAdapter?: MaterialAdapter<Material>;
+  /** Makes the material for a name Blender introduces (default: a MeshStandardMaterial). */
+  createMaterial?: (name: string) => Material;
+}
+
+export class ThreeSide implements EngineSide<Object3D, Material> {
   readonly root = new Group();
   private readonly entities = new Map<string, Object3D>();
-  private readonly materials = new Map<string, MeshStandardMaterial>();
-  private readonly materialStates = new Map<string, MaterialState>();
+  /** Project materials by name: Blender's, and those tracked meshes use. */
+  private readonly materials = new Map<string, Material>();
   private readonly adapters: FieldAdapters;
-  /** What an empty slot renders with. */
-  private readonly fallback = new MeshStandardMaterial({ color: 0xcccccc, roughness: 0.5 });
+  private readonly materialAdapter: MaterialAdapter<Material>;
+  private readonly createMaterial: (name: string) => Material;
+  /** What an empty slot renders with (three.js meshes always have a material); reads as no material. */
+  readonly emptySlot = new MeshStandardMaterial({ color: 0xcccccc, roughness: 0.5 });
 
   /** Adds the project root to `scene` (any Object3D). */
-  constructor(readonly scene: Object3D, options: { adapters?: Partial<FieldAdapters> } = {}) {
+  constructor(readonly scene: Object3D, options: ThreeSideOptions = {}) {
     this.adapters = { ...defaultAdapters, ...options.adapters };
+    this.materialAdapter = options.materialAdapter ?? defaultMaterialAdapter;
+    this.createMaterial = options.createMaterial ?? ((name) => new MeshStandardMaterial({ name }));
     this.root.name = "project-root";
     scene.add(this.root);
   }
 
   // --- lookups ------------------------------------------------------------------
   node(id: string): Object3D | undefined {
-    return this.entities.get(id);
+    const node = this.entities.get(id);
+    return node && this.alive(node) ? node : undefined;
   }
 
   idOf(node: Object3D | null): string | null {
     const id = node ? dataOf(node).bwId : undefined;
-    return id && this.entities.has(id) ? id : null;
+    return id && this.node(id) === node ? id : null;
   }
 
   entityOf(node: Object3D | null): Object3D | null {
     for (let n = node; n && n !== this.root; n = n.parent) {
-      const data = dataOf(n);
-      const id = data.markerFor ?? data.bwId;
-      if (id && this.entities.has(id)) return this.entities.get(id) ?? null;
+      const id = dataOf(n).bwId;
+      if (id && this.node(id) === n) return n;
     }
     return null;
   }
 
   ids(): string[] {
+    this.prune();
     return [...this.entities.keys()];
+  }
+
+  material(name: string): Material | undefined {
+    return this.materials.get(name);
   }
 
   // --- SceneSide ------------------------------------------------------------------
   read(): Record<string, EntityState> {
+    this.prune();
     const out: Record<string, EntityState> = {};
     for (const [id, node] of this.entities) {
       out[id] = {
@@ -122,19 +178,22 @@ export class ThreeSide implements EngineSide<Object3D> {
   }
 
   readMaterials(): Record<string, MaterialState> {
-    return Object.fromEntries(this.materialStates);
+    return Object.fromEntries([...this.materials].map(([name, m]) => [name, this.materialAdapter.read(m)]));
   }
 
   meshData(id: string): MeshData | null {
-    const node = this.entities.get(id);
+    const node = this.node(id);
     return node instanceof Mesh ? readGeometry(node.geometry) : null;
   }
 
   materialsOf(id: string): MaterialAssignment[] {
-    const node = this.entities.get(id);
-    return (node ? this.adapters.materials.read(node, this) : [])
+    const node = this.node(id);
+    return (node ? this.slotsOf(node) : [])
       .filter((name): name is string => Boolean(name))
-      .map((name) => ({ name, props: this.materialStates.get(name) }));
+      .map((name) => {
+        const material = this.materials.get(name);
+        return { name, props: material ? this.materialAdapter.read(material) : undefined };
+      });
   }
 
   apply(changes: Change[]): void {
@@ -150,101 +209,99 @@ export class ThreeSide implements EngineSide<Object3D> {
     }
     for (const change of changes) {
       if (change.op === "update") {
-        const node = this.entities.get(change.id);
+        const node = this.node(change.id);
         if (node) this.writeField(node, change.field, change.value);
       } else if (change.op === "geometry") {
         this.replaceGeometry(change.id, change.mesh);
       } else if (change.op === "delete") {
-        this.remove(change.id);
+        const node = this.node(change.id);
+        node?.removeFromParent();
+        node?.traverse((n) => { if (n instanceof Mesh) n.geometry.dispose(); });
+        this.prune();
       }
     }
   }
 
-  // --- editing from three.js -------------------------------------------------------
-  createPrimitive(kind: Primitive, options: { name?: string; color?: Rgba } = {}): Mesh {
-    const source = kind === "box" ? new BoxGeometry(1, 1, 1) : new SphereGeometry(0.5, 32, 16);
-    const data = readGeometry(source, { flipV: true });
-    source.dispose();
-    if (!data) throw new Error(`three.js built no ${kind}`);
-    const id = newId();
-    const mesh = new Mesh(buildGeometry(data), this.fallback);
-    mesh.name = options.name ?? `${kind}_${id.slice(0, 4)}`;
-    this.register(mesh, id, "mesh");
-    this.root.add(mesh);
-    const color = options.color ?? [0.31, 0.64, 0.88, 1];
-    const name = `material_${new Color().setRGB(color[0], color[1], color[2], LinearSRGBColorSpace).getHexString()}`;
-    this.upsertMaterial(name, { color, metallic: 0, roughness: 0.6 });
-    this.assignMaterials(mesh, [name]);
-    return mesh;
-  }
-
-  /**
-   * Brings untracked three.js content (a GLTFLoader scene, OBJ, ...) into the
-   * project: reparented under the root keeping its world placement, meshes
-   * rewritten as unindexed glTF-space data, materials turned into project
-   * materials.
-   */
-  adopt(nodes: Object3D[]): string[] {
+  // --- tracking engine content ---------------------------------------------------
+  track(nodes: Object3D[]): string[] {
     const ids: string[] = [];
     const visit = (node: Object3D): void => {
-      const id = newId();
-      if (node instanceof Mesh && node.geometry instanceof BufferGeometry && node.geometry.getAttribute("position")) {
-        const data = readGeometry(node.geometry);
-        if (data) {
-          node.geometry.dispose();
-          node.geometry = buildGeometry(data);
+      if (!this.idOf(node)) {
+        const id = newId();
+        if (node instanceof Mesh && node.geometry instanceof BufferGeometry && node.geometry.getAttribute("position")) {
+          const data = readGeometry(node.geometry);
+          if (data) {
+            node.geometry.dispose();
+            node.geometry = buildGeometry(data);
+          }
+          this.register(node, id, "mesh");
+          dataOf(node).bwMaterials = this.slotsOf(node);
+        } else {
+          this.register(node, id, node instanceof Light ? "light" : node instanceof Camera ? "camera" : "empty");
         }
-        const sources: Material[] = Array.isArray(node.material) ? node.material : [node.material];
-        const names = sources.map((source, slot) => {
-          const name = source.name || `adopted_${id.slice(0, 4)}${sources.length > 1 ? `_${slot}` : ""}`;
-          this.upsertMaterial(name, materialStateOf(source));
-          return name;
-        });
-        this.register(node, id, "mesh");
-        this.assignMaterials(node, names);
-      } else {
-        this.register(node, id, node instanceof Light ? "light" : node instanceof Camera ? "camera" : "empty");
+        ids.push(id);
       }
-      ids.push(id);
       for (const child of [...node.children]) visit(child);
     };
     for (const node of nodes) {
-      this.root.attach(node);
+      if (!isDescendant(node, this.root)) this.root.attach(node);
       visit(node);
     }
     return ids;
   }
 
-  remove(id: string): void {
-    const node = this.entities.get(id);
-    if (!node) return;
-    for (const [otherId, other] of this.entities) {
-      if (other === node || isDescendant(other, node)) this.entities.delete(otherId);
-    }
-    node.removeFromParent();
-    node.traverse((n) => { if (n instanceof Mesh) n.geometry.dispose(); });
+  // --- materials -------------------------------------------------------------------
+  /** The slot list of a node, as material names (registering materials it meets). */
+  slotsOf(node: Object3D): (string | null)[] {
+    if (!(node instanceof Mesh)) return dataOf(node).bwMaterials ?? [];
+    const materials: Material[] = Array.isArray(node.material) ? node.material : [node.material];
+    return materials.map((m) => (m === this.emptySlot ? null : this.nameOf(m)));
   }
 
-  assignMaterials(node: Object3D, names: (string | null)[]): void {
+  /** Puts materials on a node's slots by project name. */
+  assignSlots(node: Object3D, names: (string | null)[]): void {
     dataOf(node).bwMaterials = [...names];
     if (!(node instanceof Mesh)) return;
-    const materials = names.map((name) => (name && this.materials.get(name)) || this.fallback);
-    node.material = materials.length <= 1 ? materials[0] ?? this.fallback : materials;
+    const materials = names.map((name) => (name && this.materials.get(name)) || this.emptySlot);
+    node.material = materials.length <= 1 ? materials[0] ?? this.emptySlot : materials;
   }
 
-  setMaterial(name: string, state: MaterialState): void {
-    this.upsertMaterial(name, state);
+  /**
+   * A material's project name, registering it on first sight. An unnamed
+   * material gets a name; one named like a different material is renamed
+   * `name.001` (Blender's convention), since names are the identity.
+   */
+  private nameOf(material: Material): string {
+    if (material.name && this.materials.get(material.name) === material) return material.name;
+    let name = material.name || `material_${newId().slice(0, 6)}`;
+    for (let n = 1; this.materials.has(name) && this.materials.get(name) !== material; n++) {
+      name = `${material.name}.${String(n).padStart(3, "0")}`;
+    }
+    material.name = name;
+    this.materials.set(name, material);
+    return name;
   }
 
-  materialNames(): string[] {
-    return [...this.materialStates.keys()].sort();
-  }
-
-  materialState(name: string): MaterialState | undefined {
-    return this.materialStates.get(name);
+  private upsertMaterial(name: string, state: MaterialState): void {
+    let material = this.materials.get(name);
+    if (!material) {
+      material = this.createMaterial(name);
+      material.name = name;
+      this.materials.set(name, material);
+    }
+    this.materialAdapter.write(material, state);
   }
 
   // --- internals ------------------------------------------------------------------
+  private alive(node: Object3D): boolean {
+    return isDescendant(node, this.root);
+  }
+
+  /** Forgets entities whose objects left the project root. */
+  private prune(): void {
+    for (const [id, node] of this.entities) if (!this.alive(node)) this.entities.delete(id);
+  }
+
   private writeField(node: Object3D, field: Field, value: unknown): void {
     switch (field) {
       case "name": return this.adapters.name.write(node, String(value), this);
@@ -264,27 +321,26 @@ export class ThreeSide implements EngineSide<Object3D> {
   }
 
   private create(entity: EntityState, mesh: MeshData | undefined): Object3D {
-    const node = entity.kind === "mesh" && mesh ? new Mesh(buildGeometry(mesh), this.fallback) : new Group();
+    const node = entity.kind === "mesh" && mesh ? new Mesh(buildGeometry(mesh), this.emptySlot) : new Group();
+    this.root.add(node);
     this.register(node, entity.id, entity.kind);
-    if (entity.kind === "light" || entity.kind === "camera") this.addMarker(node, entity);
     this.adapters.name.write(node, entity.name, this);
     this.adapters.transform.write(node, entity.transform, this);
     this.adapters.visible.write(node, entity.visible, this);
-    this.root.add(node);
     return node;
   }
 
   private replaceGeometry(id: string, mesh: MeshData): void {
-    const node = this.entities.get(id);
+    const node = this.node(id);
     if (!node) return;
     if (node instanceof Mesh) {
       node.geometry.dispose();
       node.geometry = buildGeometry(mesh);
-      this.assignMaterials(node, dataOf(node).bwMaterials ?? []);
+      this.assignSlots(node, dataOf(node).bwMaterials ?? []);
       return;
     }
     // An empty that became a mesh: swap the node, keep children and fields.
-    const replacement = new Mesh(buildGeometry(mesh), this.fallback);
+    const replacement = new Mesh(buildGeometry(mesh), this.emptySlot);
     replacement.name = node.name;
     replacement.userData = node.userData;
     replacement.position.copy(node.position);
@@ -295,32 +351,7 @@ export class ThreeSide implements EngineSide<Object3D> {
     (node.parent ?? this.root).add(replacement);
     node.removeFromParent();
     this.entities.set(id, replacement);
-    this.assignMaterials(replacement, dataOf(replacement).bwMaterials ?? []);
-  }
-
-  private upsertMaterial(name: string, state: MaterialState): void {
-    let material = this.materials.get(name);
-    if (!material) {
-      material = new MeshStandardMaterial({ name });
-      this.materials.set(name, material);
-    }
-    material.color.setRGB(state.color[0], state.color[1], state.color[2], LinearSRGBColorSpace);
-    material.opacity = state.color[3];
-    material.transparent = state.color[3] < 1;
-    material.metalness = state.metallic;
-    material.roughness = state.roughness;
-    this.materialStates.set(name, state);
-  }
-
-  private addMarker(node: Object3D, entity: EntityState): void {
-    const light = entity.kind === "light";
-    const marker = new Mesh(
-      light ? new SphereGeometry(0.15, 12, 8) : new BoxGeometry(0.5, 0.35, 0.25),
-      new MeshBasicMaterial({ color: light ? 0xffd94d : 0x999aa6, wireframe: !light }),
-    );
-    marker.name = `${entity.name}_marker`;
-    marker.userData = { markerFor: entity.id };
-    node.add(marker);
+    this.assignSlots(replacement, dataOf(replacement).bwMaterials ?? []);
   }
 }
 
@@ -356,10 +387,11 @@ function buildGeometry(mesh: MeshData): BufferGeometry {
 }
 
 /**
- * A geometry's triangles as glTF-space mesh data (unindexed). `flipV` turns
- * three.js's own bottom-left UVs (its primitives) into glTF's top-left ones.
+ * A geometry's triangles as glTF-space mesh data (unindexed). UVs are taken
+ * as they are; three.js's own primitives use a bottom-left origin, so flip
+ * them (`1 - v`) before tracking one if its UVs matter.
  */
-function readGeometry(geometry: BufferGeometry, options: { flipV?: boolean } = {}): MeshData | null {
+function readGeometry(geometry: BufferGeometry): MeshData | null {
   const position = geometry.getAttribute("position");
   if (!position) return null;
   if (!geometry.getAttribute("normal")) geometry.computeVertexNormals();
@@ -386,20 +418,8 @@ function readGeometry(geometry: BufferGeometry, options: { flipV?: boolean } = {
     out.normals[v * 3 + 2] = normal.getZ(vertex);
     if (uv && out.uvs) {
       out.uvs[v * 2] = uv.getX(vertex);
-      out.uvs[v * 2 + 1] = options.flipV ? 1 - uv.getY(vertex) : uv.getY(vertex);
+      out.uvs[v * 2 + 1] = uv.getY(vertex);
     }
   }
   return out;
-}
-
-function materialStateOf(material: Material): MaterialState {
-  const color = Reflect.get(material, "color");
-  const c = color instanceof Color ? color : new Color(0.8, 0.8, 0.8);
-  const metalness = Reflect.get(material, "metalness");
-  const roughness = Reflect.get(material, "roughness");
-  return {
-    color: [c.r, c.g, c.b, material.opacity],
-    metallic: typeof metalness === "number" ? metalness : 0,
-    roughness: typeof roughness === "number" ? roughness : 0.5,
-  };
 }

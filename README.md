@@ -38,7 +38,7 @@ version (6.0.1), and any `EMSDK` already in your shell is ignored.
 ## Outputs
 
 ```
-dist/blender-wasm-browser/    @knervous/blender-wasm-runtime: blender.js, blender.{wasm,data}.br,
+dist/blender-wasm-browser/    @knervous/blender-web: blender.js, blender.{wasm,data}.br,
                               manifest.json, LICENSE, README.md (+ an npm pack .tgz in dist/)
 dist/blender-wasm-node/       the Node runtime: blender.js, blender.{wasm,data}.zst, manifest.json, LICENSE
 dist/blender-web-<rev>.tar.gz the demo site (serve dist/ cross-origin isolated)
@@ -52,23 +52,23 @@ runtime was built from.
 
 Two packages, the way ffmpeg.wasm splits `@ffmpeg/ffmpeg` from its core:
 
-- [`@knervous/blender-wasm`](packages/blender-wasm): the API (about 80 kB). It
+- [`@knervous/blender-web`](packages/blender-web): the API (about 80 kB). It
   has the project model, the browser session, engine adapters for Babylon.js
   (`/babylon`) and three.js (`/three`), a Vite plugin (`/vite`), a
-  `blender-wasm install <dir>` CLI and a Node session (`/node`).
-- `@knervous/blender-wasm-runtime`: the binaries (`./build.sh browser`, 33 MB
+  `blender-web install <dir>` CLI and a Node session (`/node`).
+- `@knervous/blender-web`: the binaries (`./build.sh browser`, 33 MB
   packed). It is a peer dependency of the API, so npm installs it alongside,
   and API releases don't republish it.
 
 ```js
 // vite.config.js
-import { blenderWasm } from "@knervous/blender-wasm/vite";
-export default { plugins: [blenderWasm()] }; // COOP/COEP, runtime served and emitted
+import { blenderWeb } from "@knervous/blender-web/vite";
+export default { plugins: [blenderWeb()] }; // COOP/COEP, runtime served and emitted
 
 // app
-import { Project } from "@knervous/blender-wasm";
-import { createBlenderSession } from "@knervous/blender-wasm/browser";
-import { ThreeSide } from "@knervous/blender-wasm/three"; // or BabylonSide from /babylon
+import { Project } from "@knervous/blender-web";
+import { createBlenderSession } from "@knervous/blender-web/browser";
+import { ThreeSide } from "@knervous/blender-web/three"; // or BabylonSide from /babylon
 
 const project = new Project({ session: createBlenderSession(), scene: new ThreeSide(scene) });
 await project.newScene();

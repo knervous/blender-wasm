@@ -1,4 +1,4 @@
-# @knervous/blender-wasm
+# @knervous/blender-web
 
 Blender 5.3, compiled to WebAssembly, embedded in your page and kept in sync
 with a Babylon.js or three.js scene. Blender boots once in a worker and stays
@@ -7,10 +7,10 @@ changes, never whole scenes, and mesh data crosses only where geometry
 changed. Python 3.13, numpy, glTF and Cycles (CPU) are in the runtime.
 
 ```
-npm install @knervous/blender-wasm @knervous/blender-wasm-runtime
+npm install @knervous/blender-web @knervous/blender-web
 ```
 
-The binaries are in `@knervous/blender-wasm-runtime` (33 MB, brotli), a peer
+The binaries are in `@knervous/blender-web` (33 MB, brotli), a peer
 dependency, so npm 7+ installs them with this package. They ship apart from
 the API, as ffmpeg.wasm keeps its core apart, so API releases don't republish
 them. `three` or `@babylonjs/core` is your own, an optional peer the adapter
@@ -20,28 +20,28 @@ uses as found in your app.
 
 | import | what |
 |---|---|
-| `@knervous/blender-wasm` | `Project`, typed changes, translators, hooks, `MemoryScene`, the shared description's types |
-| `@knervous/blender-wasm/browser` | `createBlenderSession` (persistent, with boot progress), `createBlenderRunner` (a run per call), `runtimeInstalled` |
-| `@knervous/blender-wasm/three` | `ThreeSide`: project entities as `Object3D`s |
-| `@knervous/blender-wasm/babylon` | `BabylonSide`: project entities as `TransformNode`s (deep imports, so tree-shaken) |
-| `@knervous/blender-wasm/vite` | `blenderWasm()`: headers, the runtime served in dev and emitted on build |
-| `@knervous/blender-wasm/runtime` | `installRuntime`, `resolveRuntimeDir` (Node, build tooling) |
-| `@knervous/blender-wasm/node` | `createNodeSession`, `createNodeRunner`, `runPython` (Node runtime) |
-| `blender-wasm` (bin) | `blender-wasm install <dir>`, `blender-wasm info` |
+| `@knervous/blender-web` | `Project`, typed changes, translators, hooks, `MemoryScene`, the shared description's types |
+| `@knervous/blender-web/browser` | `createBlenderSession` (persistent, with boot progress), `createBlenderRunner` (a run per call), `runtimeInstalled` |
+| `@knervous/blender-web/three` | `ThreeSide`: project entities as `Object3D`s |
+| `@knervous/blender-web/babylon` | `BabylonSide`: project entities as `TransformNode`s (deep imports, so tree-shaken) |
+| `@knervous/blender-web/vite` | `blenderWeb()`: headers, the runtime served in dev and emitted on build |
+| `@knervous/blender-web/runtime` | `installRuntime`, `resolveRuntimeDir` (Node, build tooling) |
+| `@knervous/blender-web/node` | `createNodeSession`, `createNodeRunner`, `runPython` (Node runtime) |
+| `blender-wasm` (bin) | `blender-web install <dir>`, `blender-web info` |
 
 ## With Vite
 
 ```js
 // vite.config.js
-import { blenderWasm } from "@knervous/blender-wasm/vite";
-export default { plugins: [blenderWasm()] };
+import { blenderWeb } from "@knervous/blender-web/vite";
+export default { plugins: [blenderWeb()] };
 ```
 
 ```ts
 import { Scene } from "three";
-import { Project } from "@knervous/blender-wasm";
-import { createBlenderSession } from "@knervous/blender-wasm/browser";
-import { ThreeSide } from "@knervous/blender-wasm/three";
+import { Project } from "@knervous/blender-web";
+import { createBlenderSession } from "@knervous/blender-web/browser";
+import { ThreeSide } from "@knervous/blender-web/three";
 
 const scene = new Scene();
 const side = new ThreeSide(scene);                 // adds its project root to the scene
@@ -73,7 +73,7 @@ Copy the runtime to where your pages are served, then point the session at
 it:
 
 ```
-npx blender-wasm install public/blender-runtime
+npx blender-web install public/blender-runtime
 ```
 
 ```ts
@@ -112,8 +112,8 @@ runtime's sha256 manifest on install.
 The Node runtime is a separate build (`./build.sh node`), not published yet:
 
 ```ts
-import { MemoryScene, Project } from "@knervous/blender-wasm";
-import { createNodeSession } from "@knervous/blender-wasm/node";
+import { MemoryScene, Project } from "@knervous/blender-web";
+import { createNodeSession } from "@knervous/blender-web/node";
 
 const session = await createNodeSession({ runtimeDir: "dist/blender-wasm-node" });
 const project = new Project({ session, scene: new MemoryScene() });

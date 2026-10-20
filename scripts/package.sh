@@ -12,13 +12,10 @@
 #   blender.data.br|.zst  preloaded scripts, datafiles, CPython stdlib, numpy
 #   manifest.json         sizes and sha256 (compressed and raw), and the exact
 #                         sources it was built from
-#   LICENSE               Blender is GPL-2.0-or-later; so is this package
-# The browser one is the npm package @knervous/blender-wasm-runtime, a peer
-# dependency of the API (@knervous/blender-wasm, packages/blender-wasm), which
-# installs it where pages are served (`blender-wasm install`, or its Vite
-# plugin). Binaries ship separately from the API, as ffmpeg.wasm's core does,
-# so API releases do not republish them. Its version is the API's
-# (BLENDER_WASM_VERSION overrides).
+#   LICENSE               GPL-3.0-or-later: Blender as a whole (its sources are
+#                         GPL-2.0-or-later; Apache-2.0 dependencies make the binary GPL-3)
+# The browser runtime ships inside the npm package @knervous/blender-web
+# (packages/blender-web, whose build copies it into runtime/).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -38,7 +35,6 @@ if [ "$FLAVOR" = web ]; then
   exit 0
 fi
 
-VERSION="${BLENDER_WASM_VERSION:-$(node -p "require('$ROOT/packages/blender-wasm/package.json').version")}"
 SRC="$ROOT/$FLAVOR"
 for f in blender.js blender.wasm blender.data; do
   [ -f "$SRC/$f" ] || die "missing $SRC/$f — run ./build.sh $FLAVOR first"
@@ -55,39 +51,21 @@ if [ "$FLAVOR" = browser ]; then
 else
   COMPRESS_BROTLI=0 bash "$ROOT/scripts/compress.sh" "$PKG/blender.wasm" "$PKG/blender.data"
 fi
-cp "$ROOT/LICENSE" "$PKG/LICENSE"
+cp "$BLENDER_SRC/doc/license/GPL3-license.txt" "$PKG/LICENSE"
 
-if [ "$FLAVOR" = browser ]; then
-  NAME="@knervous/blender-wasm-runtime"; PRIVATE=false; PKG_VERSION="$VERSION"
-  cat > "$PKG/README.md" <<MD
-# @knervous/blender-wasm-runtime
-
-Blender $(git -C "$BLENDER_SRC" describe --tags --always 2>/dev/null || echo 5.3) compiled to WebAssembly (pthreads, headless),
-built from [knervous/blender-wasm](https://github.com/knervous/blender-wasm) at $FORK_REV.
-Binaries only: install [@knervous/blender-wasm](https://www.npmjs.com/package/@knervous/blender-wasm),
-which loads this runtime and puts it where your pages are served.
-
-\`manifest.json\` lists every file's size and sha256, compressed and raw.
-GPL-2.0-or-later, like Blender.
-MD
-else
-  NAME="@knervous/blender-wasm-runtime-node"; PRIVATE=true; PKG_VERSION="$VERSION-$FORK_REV"
-fi
-
-# The glue is CommonJS and references its own filename when spawning pthread
-# workers, so it cannot be renamed to .cjs; scope CommonJS to this directory.
-cat > "$PKG/package.json" <<JSON
+if [ "$FLAVOR" = node ]; then
+  # The glue is CommonJS and references its own filename when spawning pthread
+  # workers, so it cannot be renamed to .cjs; scope CommonJS to this directory.
+  cat > "$PKG/package.json" <<JSON
 {
-  "name": "$NAME",
-  "version": "$PKG_VERSION",
-  "private": $PRIVATE,
-  "description": "Blender compiled to WebAssembly: the runtime binaries for @knervous/blender-wasm",
-  "license": "GPL-2.0-or-later",
-  "repository": { "type": "git", "url": "git+https://github.com/knervous/blender-wasm.git" },
-  "type": "commonjs",
-  "files": ["blender.js", "blender.wasm.*", "blender.data.*", "manifest.json", "LICENSE", "README.md"]
+  "name": "@knervous/blender-web-runtime-node",
+  "version": "0.0.0-$FORK_REV",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "commonjs"
 }
 JSON
+fi
 
 python3 - "$PKG" "$FLAVOR" "$FORK_REV" "$BLENDER_REV" "$EMSDK_VERSION" "${WASM_OPT_LEVEL:-none}" <<'PY'
 import hashlib, json, os, sys
@@ -115,11 +93,6 @@ json.dump({
 PY
 rm -f "$PKG/blender.wasm" "$PKG/blender.data"
 
-if [ "$FLAVOR" = browser ]; then
-  ( cd "$PKG" && npm pack --silent --pack-destination "$DIST" >/dev/null )
-  log "packaged $PKG and $DIST/knervous-blender-wasm-runtime-$VERSION.tgz ($(du -h "$DIST/knervous-blender-wasm-runtime-$VERSION.tgz" | cut -f1))"
-else
-  out="$DIST/blender-wasm-$FLAVOR-$FORK_REV.tar"
-  tar -C "$DIST" -cf "$out" "blender-wasm-$FLAVOR"
-  log "packaged $PKG and $out ($(du -h "$out" | cut -f1))"
-fi
+out="$DIST/blender-wasm-$FLAVOR-$FORK_REV.tar"
+tar -C "$DIST" -cf "$out" "blender-wasm-$FLAVOR"
+log "packaged $PKG and $out ($(du -h "$out" | cut -f1)); npm: packages/blender-web (npm run build)"

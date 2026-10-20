@@ -5,7 +5,7 @@
  * that build when it is missing, or with --rebuild.
  *
  * The headless runtime the editor drives needs no step here: it is the
- * @knervous/blender-wasm-runtime package, served by the Vite plugin.
+ * @knervous/blender-web package, served by the Vite plugin.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync, symlinkSync } from "node:fs";

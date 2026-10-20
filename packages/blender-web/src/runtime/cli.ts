@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- *   blender-wasm install <dir> [--no-br] [--runtime <dir>]
+ *   blender-web install <dir> [--no-br] [--runtime <dir>]
  *       copy the browser runtime into <dir> (e.g. public/blender-runtime), for
- *       bundlers other than Vite (which has `@knervous/blender-wasm/vite`)
- *   blender-wasm info [--runtime <dir>]
+ *       bundlers other than Vite (which has `@knervous/blender-web/vite`)
+ *   blender-web info [--runtime <dir>]
  *       where the runtime package is and what it was built from
  */
 import { installRuntime, readRuntimeManifest, resolveRuntimeDir } from "./index.ts";
@@ -20,15 +20,15 @@ const positional = rest.filter((arg) => !arg.startsWith("--"));
 try {
   if (command === "install" && positional[0]) {
     const { dest, manifest, skipped } = installRuntime({
-      dest: positional[0], runtimeDir, from: process.cwd(), compressed: !noBrotli, log: console.log,
+      dest: positional[0], runtimeDir, compressed: !noBrotli, log: console.log,
     });
     console.log(`${skipped ? "up to date" : "installed"}: runtime ${manifest.forkRevision} in ${dest}`);
   } else if (command === "info") {
-    const dir = resolveRuntimeDir({ runtimeDir, from: process.cwd() });
+    const dir = resolveRuntimeDir({ runtimeDir });
     const manifest = readRuntimeManifest(dir);
     console.log(JSON.stringify({ dir, ...manifest }, null, 2));
   } else {
-    console.log("usage: blender-wasm install <dir> [--no-br] [--runtime <dir>] | blender-wasm info");
+    console.log("usage: blender-web install <dir> [--no-br] [--runtime <dir>] | blender-web info");
     process.exit(command ? 1 : 0);
   }
 } catch (error) {

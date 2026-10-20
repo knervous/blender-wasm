@@ -1,7 +1,7 @@
 # Blender editor (Babylon.js or three.js)
 
 A small editor with Blender running in the same tab, compiled to
-WebAssembly, on [`@knervous/blender-wasm`](../../packages/blender-wasm).
+WebAssembly, on [`@knervous/blender-web`](../../packages/blender-web).
 `?engine=three` uses three.js; Babylon.js is the default. Open a `.blend` (or
 anything Blender imports) and edit it in the engine. Moves, deletions, new
 objects, material assignment and material colour, metallic and roughness all
@@ -15,8 +15,8 @@ npm run dev              # http://localhost:5321  (?engine=three)
 ```
 
 Both engines, both packages and Vite are dev dependencies. The packages are
-linked from this repository: `@knervous/blender-wasm` from
-`../../packages/blender-wasm` (built by `predev`), and the runtime from
+linked from this repository: `@knervous/blender-web` from
+`../../packages/blender-web` (built by `predev`), and the runtime from
 `../../dist/blender-wasm-browser`. A first `./build.sh browser` compiles
 Blender from source, which takes hours (see the top-level README).
 `npm run blender:ui` links the full Blender UI (`../../build.sh web`) for
@@ -24,7 +24,7 @@ Blender from source, which takes hours (see the top-level README).
 
 ## How Blender runs
 
-`blenderWasm()` in `vite.config.js` serves the runtime at `blender-runtime/`
+`blenderWeb()` in `vite.config.js` serves the runtime at `blender-runtime/`
 and sends the cross-origin isolation headers Blender's threads need. A build
 writes the runtime into `dist/blender-runtime/` with `.br` copies, and the
 host must send the same headers. Blender boots once in one worker, with the
@@ -40,7 +40,7 @@ picking and engine-only file loading around the package's adapter
 ## How the two sides stay in step
 
 The page and Blender share one project (design in
-[`DESIGN.md`](../../packages/blender-wasm/DESIGN.md)). Every object has a stable id. A sync
+[`DESIGN.md`](../../packages/blender-web/DESIGN.md)). Every object has a stable id. A sync
 sends only what the engine changed since the last agreed state and applies only
 what Blender changed. Mesh data crosses only for geometry whose fingerprint
 moved; there is no whole-scene export or reload.
@@ -67,10 +67,10 @@ The status line and log show each sync's traffic, for example
 - No OpenSubdiv, so Subdivision Surface does nothing. Array, Bevel, Mirror and
   the other non-subdivision modifiers work.
 - Booting Blender takes a few seconds once per page; syncs after that take
-  milliseconds (see `packages/blender-wasm/DESIGN.md`).
+  milliseconds (see `packages/blender-web/DESIGN.md`).
 - Mesh edits made in the engine travel only when an object is created; see the
-  limits in `packages/blender-wasm/DESIGN.md`.
+  limits in `packages/blender-web/DESIGN.md`.
 - `bench.html?mode=session|sdk|legacy` (Babylon.js) measures the sync against the previous
-  whole-scene path; results are in `packages/blender-wasm/DESIGN.md`.
+  whole-scene path; results are in `packages/blender-web/DESIGN.md`.
 - The console shows a `_multiprocessing` traceback on every run. That's an
   add-on import Blender reports and moves past.

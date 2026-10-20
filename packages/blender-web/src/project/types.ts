@@ -159,30 +159,37 @@ export interface SceneSide {
   apply(changes: Change[]): void;
 }
 
-export type Primitive = "box" | "sphere";
-
 /**
- * What an engine adapter (`/babylon`, `/three`) offers on top of SceneSide:
- * the project's entities as engine nodes, and edits made from the engine
- * that the next sync carries to Blender. `N` is the engine's node type.
+ * An engine adapter (`/babylon`, `/three`): the SceneSide for that engine, plus
+ * lookups between engine objects and project ids. It is the core only: the
+ * engine's own API edits the scene (move a node, assign or edit a material,
+ * dispose a node), and the adapter reads that state on the next sync. Editing
+ * tools (gizmos, pickers, outliners, primitives) are built on top.
+ * `N` is the engine's node type, `M` its material type.
  */
-export interface EngineSide<N> extends SceneSide {
+export interface EngineSide<N, M> extends SceneSide {
   /** The node every project entity lives under. */
   readonly root: N;
+  /** A live entity's node (disposed or detached nodes are no longer entities). */
   node(id: string): N | undefined;
   /** The entity id of a node that is one, else null. */
   idOf(node: N | null): string | null;
-  /** The entity a picked node belongs to (through markers and sub-nodes), if any. */
+  /** The entity a node belongs to (itself or its nearest entity ancestor), if any. */
   entityOf(node: N | null): N | null;
   ids(): string[];
-  /** A new mesh entity; colour is linear RGBA (as glTF). */
-  createPrimitive(kind: Primitive, options?: { name?: string; color?: Rgba }): N;
-  /** Brings untracked engine content into the project, keeping its world placement. */
-  adopt(nodes: N[]): string[];
-  /** Removes an entity and every entity under it. */
-  remove(id: string): void;
-  assignMaterials(node: N, names: (string | null)[]): void;
-  setMaterial(name: string, state: MaterialState): void;
-  materialNames(): string[];
-  materialState(name: string): MaterialState | undefined;
+  /**
+   * Makes engine content project entities: each node and its descendants,
+   * moved under the root keeping their world placement, meshes rewritten into
+   * the shared winding and layout. They reach Blender on the next sync.
+   * Returns the new ids.
+   */
+  track(nodes: N[]): string[];
+  /** The engine material behind a project material name (Blender's or one a tracked mesh uses). */
+  material(name: string): M | undefined;
+}
+
+/** Reads and writes a material's shared properties on an engine material. */
+export interface MaterialAdapter<M> {
+  read(material: M): MaterialState;
+  write(material: M, state: MaterialState): void;
 }

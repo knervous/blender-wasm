@@ -1,10 +1,11 @@
 import {
   ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, GizmoManager, HemisphericLight, LoadAssetContainerAsync,
-  MeshBuilder, PointerEventTypes, Scene, SceneSerializer, TransformNode, Vector3,
+  Mesh, MeshBuilder, MultiMaterial, PBRMaterial, PointerEventTypes, Scene, SceneSerializer, StandardMaterial,
+  TransformNode, Vector3,
   type Node,
 } from "@babylonjs/core";
 import "@babylonjs/loaders";
-import { BabylonSide } from "@knervous/blender-wasm/babylon";
+import { BabylonSide, defaultMaterialAdapter } from "@knervous/blender-web/babylon";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
 export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<TransformNode> & { scene: Scene } {
@@ -25,6 +26,8 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
   grid.isPickable = false;
 
   const side = new BabylonSide(scene);
+  /** Materials made here and not yet on a tracked mesh (so not yet project materials). */
+  const created = new Map<string, PBRMaterial>();
   /** Content loaded into Babylon outside the project (until adopted). */
   let untracked: TransformNode[] = [];
   const untrackedRootOf = (node: Node | null): TransformNode | null => {
@@ -86,7 +89,7 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
       return untracked;
     },
     adoptUntracked() {
-      const ids = side.adopt(untracked);
+      const ids = side.track(untracked);
       untracked = [];
       return ids;
     },
@@ -95,5 +98,54 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
       untracked = untracked.filter((n) => n !== node);
     },
     exportNative: async () => JSON.stringify(await SceneSerializer.SerializeAsync(scene)),
+    addPrimitive(kind, color) {
+      const name = `${kind}_${Math.random().toString(16).slice(2, 6)}`;
+      const mesh = kind === "box"
+        ? MeshBuilder.CreateBox(name, { size: 1 }, scene)
+        : MeshBuilder.CreateSphere(name, { diameter: 1, segments: 16 }, scene);
+      const material = new PBRMaterial(`${name}_material`, scene);
+      defaultMaterialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
+      mesh.material = material;
+      side.track([mesh]);
+      return mesh;
+    },
+    deleteNode(node) {
+      node.dispose(false, false);
+      untracked = untracked.filter((n) => n !== node);
+    },
+    assignMaterial(node, name) {
+      if (!(node instanceof Mesh)) return;
+      const material = name ? side.material(name) ?? created.get(name) ?? null : null;
+      if (node.material instanceof MultiMaterial) node.material.subMaterials[0] = material;
+      else node.material = material;
+    },
+    createMaterial(name, state) {
+      const material = new PBRMaterial(name, scene);
+      defaultMaterialAdapter.write(material, state);
+      created.set(material.name, material);
+      return material.name;
+    },
+    editMaterial(name, state) {
+      const material = side.material(name);
+      if (material) defaultMaterialAdapter.write(material, state);
+    },
+    decorate() {
+      for (const [id, entity] of Object.entries(side.read())) {
+        if (entity.kind !== "light" && entity.kind !== "camera") continue;
+        const node = side.node(id);
+        if (!node || node.getChildMeshes(true).some((m) => m.metadata?.marker)) continue;
+        const light = entity.kind === "light";
+        const marker = light
+          ? MeshBuilder.CreateSphere(`${entity.name}_marker`, { diameter: 0.3, segments: 8 }, scene)
+          : MeshBuilder.CreateBox(`${entity.name}_marker`, { width: 0.5, height: 0.35, depth: 0.25 }, scene);
+        const material = new StandardMaterial(`${entity.name}_marker`, scene);
+        material.emissiveColor = light ? new Color3(1, 0.85, 0.3) : new Color3(0.6, 0.6, 0.65);
+        material.disableLighting = true;
+        material.wireframe = !light;
+        marker.material = material;
+        marker.parent = node;
+        marker.metadata = { marker: true };
+      }
+    },
   };
 }

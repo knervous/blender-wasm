@@ -5,7 +5,7 @@
  * Both load a served runtime directory (`runtimeUrl`, default
  * `blender-runtime/` under the page's base): blender.js, blender.wasm,
  * blender.data, manifest.json and this package's workers, as the Vite plugin
- * (`@knervous/blender-wasm/vite`) or `blender-wasm install <dir>` lay it out.
+ * (`@knervous/blender-web/vite`) or `blender-web install <dir>` lay it out.
  * The page must be cross-origin isolated (COOP same-origin + COEP
  * require-corp): Blender's pthreads need SharedArrayBuffer.
  */
@@ -21,7 +21,7 @@ export interface RuntimeManifest {
   raw?: Record<string, { bytes: number; sha256: string }>;
 }
 
-/** Where the Vite plugin and `blender-wasm install` put the runtime, relative to the page. */
+/** Where the Vite plugin and `blender-web install` put the runtime, relative to the page. */
 export const DEFAULT_RUNTIME_URL = "blender-runtime/";
 
 /** Blender's threads need SharedArrayBuffer, which only a cross-origin isolated page has. */
