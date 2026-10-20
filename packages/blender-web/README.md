@@ -135,11 +135,22 @@ file is checked against the runtime's sha256 manifest on install.
   and the emscripten glue load unmodified: Blender's pthreads re-load the
   glue, and a bundled copy breaks them. The page compiles `blender.wasm` while
   `blender.data` downloads, then hands both to the worker (`instantiateWasm`).
-- **From a CDN.** `runtimeUrl` may point at another origin, which must send
-  CORS (and `Cross-Origin-Resource-Policy: cross-origin` for an isolated
-  page). Workers must be same-origin, so they start from a blob that imports
-  the real script, the workaround emscripten's maintainers gave in
-  emscripten#21937.
+- **From a CDN.** The package's own `runtime/` is a servable runtime, so a
+  CDN serving the package works as `runtimeUrl`:
+
+  ```ts
+  createBlenderSession({ runtimeUrl: "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.1/runtime/" });
+  ```
+
+  A CDN sends the `.br` files as plain bytes (browsers decode brotli only as
+  a Content-Encoding, and `DecompressionStream` has none), so the page
+  streams them through `brotli-decode.wasm` (174 KB, brotli's own decoder)
+  while `blender.wasm` compiles. The origin must send CORS (and
+  `Cross-Origin-Resource-Policy: cross-origin` for an isolated page).
+  Workers must be same-origin, so they start from a blob that imports the
+  real script, the workaround emscripten's maintainers gave in
+  emscripten#21937. `demos/playground/` has scratch files for the Babylon.js
+  and Babylon Lite playgrounds.
 
 ## Node
 

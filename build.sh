@@ -216,7 +216,9 @@ flavor() {
       configure headless; compile
       link "$flavor"
       optimize "$ROOT/$flavor"
-      step "package $flavor"; bash scripts/package.sh "$flavor" ;;
+      step "package $flavor"; bash scripts/package.sh "$flavor"
+      # The page-side brotli decoder the npm package ships with the runtime.
+      if [ "$flavor" != node ]; then bash scripts/build_brotli_decoder.sh; fi ;;
     web)
       configure gui; compile
       [ "$OPTIMIZE" = 1 ] || export WASM_OPT_LEVEL=none

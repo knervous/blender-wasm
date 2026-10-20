@@ -61,6 +61,13 @@ for (const flavor of Object.keys(SOURCES)) {
 }
 if (Object.keys(flavors).length) {
   for (const name of ["session-worker.js", "run-worker.js"]) copyFileSync(join(root, "src/browser", name), join(root, "runtime", name));
+  // The page's brotli decoder (scripts/build_brotli_decoder.sh), for a CDN that serves the .br files as they are.
+  const decoder = process.env.BLENDER_WEB_BROTLI_DECODER ?? resolve(root, "../../dist/brotli-decode.wasm");
+  if (existsSync(decoder)) copyFileSync(decoder, join(root, "runtime/brotli-decode.wasm"));
+  else if (process.argv.includes("--require-runtime")) {
+    console.error(`no ${decoder}: run scripts/build_brotli_decoder.sh`);
+    process.exit(1);
+  }
   writeFileSync(join(root, "runtime/manifest.json"), JSON.stringify({
     forkRevision: Object.values(flavors)[0].forkRevision,
     encoding: "br",

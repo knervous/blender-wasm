@@ -428,7 +428,9 @@ function editor<N extends object>(view: Viewport<N>): void {
     $("ui-open", HTMLButtonElement).disabled = !uiInstalled;
     if (!uiInstalled) $("ui-open").title = "Not installed: npm run blender:ui";
     // The Vite plugin serves the runtime package at blender-runtime/ (the default).
-    const manifest = await runtimeInstalled();
+    // ?runtime=<url> loads the runtime from elsewhere (e.g. the package's runtime/ on a CDN).
+    const runtimeUrl = new URLSearchParams(location.search).get("runtime") ?? undefined;
+    const manifest = await runtimeInstalled(runtimeUrl);
     if (!manifest) {
       $("runtime").textContent = "not found";
       setStatus(`Blender's runtime is not served at blender-runtime/. ${view.engine}-only editing still works.`, "error");
@@ -438,7 +440,7 @@ function editor<N extends object>(view: Viewport<N>): void {
     // ?threads=1|0 forces the pthread or single-threaded build; "auto" picks by isolation.
     const forced = new URLSearchParams(location.search).get("threads");
     const threads = forced === "1" ? true : forced === "0" ? false : "auto";
-    const session = createBlenderSession({ threads, onProgress: showBootProgress });
+    const session = createBlenderSession({ runtimeUrl, threads, onProgress: showBootProgress });
     project = new Project({
       session,
       scene: side,

@@ -17,6 +17,7 @@
  */
 import type { BlenderJob, BlenderRunner, BlenderSession } from "../project/index.ts";
 import { PROTOCOL_SOURCE } from "../project/protocol.generated.ts";
+import { loadBrotliDecoder, type BrotliDecoder } from "./brotli.ts";
 
 export type Flavor = "mt" | "st";
 
@@ -30,6 +31,12 @@ export interface FlavorManifest {
 
 export interface RuntimeManifest {
   forkRevision: string;
+  /**
+   * "br" when the binaries are served only as `.br` files (the package's own
+   * runtime/ on a CDN): the page decodes them with brotli-decode.wasm.
+   * Absent for an installed runtime, which has the raw files.
+   */
+  encoding?: "br";
   flavors: Partial<Record<Flavor, FlavorManifest>>;
 }
 
@@ -98,14 +105,18 @@ const START_STEPS: Record<string, [number, string]> = {
   python: [0.9, "starting Python"],
 };
 
-async function fetchCounted(url: string, size: number | undefined, onBytes: (delta: number, total: number) => void): Promise<Response> {
+async function fetchCounted(url: string, size: number | undefined, onBytes: (delta: number, total: number) => void,
+  decoder: BrotliDecoder | null): Promise<Response> {
   const response = await fetch(url);
   if (!response.ok || !response.body) throw new Error(`${url}: HTTP ${response.status}`);
   // The body arrives inflated; Content-Length is the encoded size when the
   // server compressed it, so prefer the manifest's raw size.
   const encoded = Boolean(response.headers.get("content-encoding"));
   const total = size ?? (encoded ? 0 : Number(response.headers.get("content-length") ?? 0));
-  const reader = response.body.getReader();
+  // A .br file the server sent as plain bytes is decoded here; one it sent
+  // with Content-Encoding arrives decoded already.
+  const body = decoder && !encoded ? response.body.pipeThrough(decoder()) : response.body;
+  const reader = body.getReader();
   const counted = new ReadableStream<Uint8Array>({
     async pull(controller) {
       const { done, value } = await reader.read();
@@ -128,6 +139,8 @@ async function loadRuntime(runtimeUrl: string, threads: ThreadsOption, report: (
   const flavor = pickFlavor(runtime, threads);
   const manifest: Partial<FlavorManifest> = runtime.flavors[flavor] ?? {};
   const flavorUrl = `${runtimeUrl}${flavor}/`;
+  const decoder = runtime.encoding === "br" ? await loadBrotliDecoder(`${runtimeUrl}brotli-decode.wasm`) : null;
+  const suffix = decoder ? ".br" : "";
   const totals = { wasm: 0, data: 0 };
   const loaded = { wasm: 0, data: 0 };
   const emit = () => {
@@ -140,12 +153,12 @@ async function loadRuntime(runtimeUrl: string, threads: ThreadsOption, report: (
     loaded[key] += delta;
     emit();
   };
-  const wasm = fetchCounted(flavorUrl + "blender.wasm", manifest.raw?.["blender.wasm"]?.bytes, count("wasm")).then((response) => {
+  const wasm = fetchCounted(`${flavorUrl}blender.wasm${suffix}`, manifest.raw?.["blender.wasm"]?.bytes, count("wasm"), decoder).then((response) => {
     // compileStreaming needs the wasm media type on the (re-wrapped) response.
     const typed = new Response(response.body, { headers: { "content-type": "application/wasm" } });
     return WebAssembly.compileStreaming(typed);
   });
-  const data = fetchCounted(flavorUrl + "blender.data", manifest.raw?.["blender.data"]?.bytes, count("data")).then((r) => r.arrayBuffer());
+  const data = fetchCounted(`${flavorUrl}blender.data${suffix}`, manifest.raw?.["blender.data"]?.bytes, count("data"), decoder).then((r) => r.arrayBuffer());
   const [wasmModule, dataPackage] = await Promise.all([wasm, data]);
   report({ phase: "compile", fraction: 0.5, loaded: loaded.wasm + loaded.data, total: totals.wasm + totals.data, detail: "compiled" });
   return { wasmModule, dataPackage, flavor, flavorUrl };
