@@ -6,9 +6,9 @@
 // package's runtime/; keep its version the one the editor depends on).
 const EDITOR = "https://esm.sh/@knervous/blender-web-editor@0.0.1";
 const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
-// A hosted Blender UI (the fork's `./build.sh web`, with its _headers) adds a
-// "Blender UI" button that swaps to Blender's own interface and back.
-const BLENDER_UI = null;
+// The hosted Blender UI (the fork's `./build.sh web`, demo/wrangler.jsonc)
+// adds a "Blender UI" button: Blender's own interface on the same .blend, and back.
+const BLENDER_UI = "https://blender-web-ui.pcj174.workers.dev/";
 
 export const createScene = async function () {
     const scene = new BABYLON.Scene(engine);

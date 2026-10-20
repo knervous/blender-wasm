@@ -8,9 +8,9 @@ import { liteViewport } from "@knervous/blender-web-editor@0.0.1/lite";
 // Blender's runtime from jsDelivr: the core package's runtime/, at the
 // version the editor depends on.
 const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
-// A hosted Blender UI (the fork's `./build.sh web`, with its _headers) adds a
-// "Blender UI" button that swaps to Blender's own interface and back.
-const BLENDER_UI: string | undefined = undefined;
+// The hosted Blender UI (the fork's `./build.sh web`, demo/wrangler.jsonc)
+// adds a "Blender UI" button: Blender's own interface on the same .blend, and back.
+const BLENDER_UI: string | undefined = "https://blender-web-ui.pcj174.workers.dev/";
 
 async function main(): Promise<void> {
     // The app's scene: engine, camera, light and render loop stay the app's.

@@ -107,7 +107,10 @@ Boot it at startup: it stays transparent and inert until shown (not
 `display: none`, which would stop it drawing), so a swap takes tens of
 milliseconds. Coming back is an ordinary sync: only what was edited in the UI
 reaches the engine. The UI site is `./build.sh web` (`demo/dist/`). Host it
-with the headers in `demo/public/_headers`. `Document-Isolation-Policy`
+with the headers in `demo/public/_headers`; `npx wrangler deploy` in `demo/`
+publishes it as Cloudflare Workers static assets (`demo/wrangler.jsonc`). On
+an origin's first visit the site seeds default preferences with the splash
+off, so an embedded UI opens straight to the scene. `Document-Isolation-Policy`
 there lets it run its threads inside any page, isolated or not. Messages
 are checked by origin and source, and `parent=` tells the UI which origin
 may drive it.

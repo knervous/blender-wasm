@@ -846,6 +846,32 @@ window.__blenderFileOpenHook = async () => {
   }
 };
 
+/* First run on an origin: Blender finds no preferences in OPFS and opens its
+ * Quick Setup splash, which takes no input in this build (and an embedded
+ * editing surface wants no splash at all). Seed default preferences, with the
+ * splash off, when none exist yet; Blender upgrades them to its version on
+ * load, and the user's own changes replace them from then on. */
+async function seedPreferences() {
+  try {
+    let dir = await navigator.storage.getDirectory();
+    for (const name of ["home", ".config", "blender", "5.3", "config"]) {
+      dir = await dir.getDirectoryHandle(name, { create: true });
+    }
+    try {
+      await dir.getFileHandle("userpref.blend");
+      return; // the user's own (or an earlier seed)
+    } catch (e) { /* none yet */ }
+    const response = await fetch("default-userpref.blend");
+    if (!response.ok) return;
+    const writable = await (await dir.getFileHandle("userpref.blend", { create: true })).createWritable();
+    await writable.write(await response.arrayBuffer());
+    await writable.close();
+    log("Seeded default preferences (first run on this origin)");
+  } catch (e) {
+    log("preferences seed: " + e);
+  }
+}
+
 /* ---- Launch: build Module (all the boot wiring) and load blender.js. Gated on
  * the Launch button, which is enabled once both downloads finished above. The
  * WebGPU device itself is acquired on the render pthread (creator.cc bootstrap),
@@ -865,6 +891,7 @@ async function start() {
     console.warn("WebGPU is using a SOFTWARE renderer — Blender will be extremely slow.");
   }
   setUiPhase("console");
+  await seedPreferences();
   startBtn.disabled = true;
   startBtn.textContent = "Starting…";
 
