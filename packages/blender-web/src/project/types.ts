@@ -193,3 +193,41 @@ export interface MaterialAdapter<M> {
   read(material: M): MaterialState;
   write(material: M, state: MaterialState): void;
 }
+
+/** An object as Blender's API lists it: `id` is the project's bw_id, if it has one. */
+export interface BlenderObjectInfo {
+  id: string | null;
+  name: string;
+  kind: EntityKind;
+  /** The parent's bw_id, else its name; null at the top. */
+  parent: string | null;
+}
+
+/** An RNA value as Blender's API returns it (enums as identifiers, ID pointers as names, collections as lengths). */
+export type RnaValue = number | boolean | string | number[] | boolean[] | null;
+
+/** What `set` and operator properties accept. */
+export type RnaInput = number | boolean | string | number[];
+
+export type OperatorResult = "FINISHED" | "CANCELLED" | "PASS_THROUGH" | "NOT_FOUND";
+
+/**
+ * Blender's direct API (embind, the headless builds' bw_api): typed calls on
+ * Blender's own RNA, for hosts that drive Blender without writing Python.
+ * Python stays available (`python`, and scripts in `Project.sync`). Every call
+ * runs on Blender's thread between requests. Paths are in bpy.data syntax,
+ * e.g. `objects["Cube"].location`. Edits made here are Blender's: the next
+ * `Project.sync()` brings them to the scene.
+ */
+export interface BlenderApi {
+  get(path: string): Promise<RnaValue>;
+  /** Sets a property and runs its RNA update; false when the path or value does not fit. */
+  set(path: string, value: RnaInput): Promise<boolean>;
+  /** Runs an operator (`"mesh.primitive_cube_add"` or `"MESH_OT_primitive_cube_add"`). */
+  call(operator: string, props?: Record<string, RnaInput>): Promise<OperatorResult>;
+  /** Runs a Python statement; false if it raised. */
+  python(code: string): Promise<boolean>;
+  objects(): Promise<BlenderObjectInfo[]>;
+  /** An object's evaluated mesh (by bw_id or name), in glTF space, grouped by material slot. */
+  mesh(idOrName: string): Promise<MeshData | null>;
+}

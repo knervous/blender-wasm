@@ -1,45 +1,43 @@
-import {
-  ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, GizmoManager, HemisphericLight, LoadAssetContainerAsync,
-  Material, Mesh, MeshBuilder, MultiMaterial, PBRMaterial, PointerEventTypes, Quaternion, Scene, SceneSerializer,
-  StandardMaterial, SubMesh, TransformNode, Vector3, VertexBuffer, VertexData,
-  type Node,
-} from "@babylonjs/core";
-import "@babylonjs/loaders";
+import type * as BABYLON from "@babylonjs/core";
 import { BabylonSide } from "@knervous/blender-web/babylon";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
-export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<TransformNode> & { scene: Scene } {
-  const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
-  const scene = new Scene(engine);
-  scene.clearColor = new Color4(0.16, 0.16, 0.17, 1);
+type TransformNode = BABYLON.TransformNode;
+type Node = BABYLON.Node;
 
-  const camera = new ArcRotateCamera("editor-camera", -Math.PI / 3, Math.PI / 3, 14, Vector3.Zero(), scene);
-  camera.attachControl(canvas, true);
-  camera.wheelPrecision = 30;
-  camera.minZ = 0.05;
-  new HemisphericLight("editor-sky", new Vector3(0, 1, 0), scene).intensity = 0.8;
-  new DirectionalLight("editor-sun", new Vector3(-0.5, -1, -0.3), scene).intensity = 0.9;
-  const gridLines: Vector3[][] = [];
-  for (let i = -10; i <= 10; i++) gridLines.push([new Vector3(i, 0, -10), new Vector3(i, 0, 10)], [new Vector3(-10, 0, i), new Vector3(10, 0, i)]);
-  const grid = MeshBuilder.CreateLineSystem("editor-grid", { lines: gridLines }, scene);
-  grid.color = new Color3(0.32, 0.32, 0.35);
-  grid.isPickable = false;
+export interface BabylonViewportOptions {
+  /** Add a grid and two lights (default false: the app's scene is the app's). */
+  helpers?: boolean;
+}
 
-  // The adapter uses this app's Babylon classes (the whole namespace works too).
-  const side = new BabylonSide({
-    Color3, Material, Mesh, MultiMaterial, PBRMaterial, Quaternion, StandardMaterial, SubMesh, TransformNode,
-    VertexBuffer, VertexData,
-  }, scene);
+/**
+ * The editor's view of an app's Babylon.js scene. `api` is the app's Babylon
+ * (`import * as BABYLON from "@babylonjs/core"`, or the playground's global
+ * BABYLON) with its loaders and serializers registered; the scene's active
+ * camera and render loop stay the app's.
+ */
+export function babylonViewport(api: typeof BABYLON, scene: BABYLON.Scene, options: BabylonViewportOptions = {}): Viewport<TransformNode> {
+  if (options.helpers) {
+    new api.HemisphericLight("editor-sky", new api.Vector3(0, 1, 0), scene).intensity = 0.8;
+    new api.DirectionalLight("editor-sun", new api.Vector3(-0.5, -1, -0.3), scene).intensity = 0.9;
+    const lines: BABYLON.Vector3[][] = [];
+    for (let i = -10; i <= 10; i++) lines.push([new api.Vector3(i, 0, -10), new api.Vector3(i, 0, 10)], [new api.Vector3(-10, 0, i), new api.Vector3(10, 0, i)]);
+    const grid = api.MeshBuilder.CreateLineSystem("editor-grid", { lines }, scene);
+    grid.color = new api.Color3(0.32, 0.32, 0.35);
+    grid.isPickable = false;
+  }
+
+  const side = new BabylonSide(api, scene);
   /** Materials made here and not yet on a tracked mesh (so not yet project materials). */
-  const created = new Map<string, PBRMaterial>();
+  const created = new Map<string, BABYLON.PBRMaterial>();
   /** Content loaded into Babylon outside the project (until adopted). */
   let untracked: TransformNode[] = [];
   const untrackedRootOf = (node: Node | null): TransformNode | null => {
-    for (let n = node; n; n = n.parent) if (n instanceof TransformNode && untracked.includes(n)) return n;
+    for (let n = node; n; n = n.parent) if (n instanceof api.TransformNode && untracked.includes(n)) return n;
     return null;
   };
 
-  const gizmos = new GizmoManager(scene);
+  const gizmos = new api.GizmoManager(scene);
   gizmos.usePointerToAttachGizmos = false;
   gizmos.positionGizmoEnabled = true;
   let attached: TransformNode | null = null;
@@ -47,26 +45,21 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
   const pick: ((node: TransformNode | null) => void)[] = [];
   const editEnd: (() => void)[] = [];
   scene.onPointerObservable.add((info) => {
-    if (info.type === PointerEventTypes.POINTERTAP && info.event.button === 0) {
+    if (info.type === api.PointerEventTypes.POINTERTAP && info.event.button === 0) {
       const mesh = info.pickInfo?.hit ? info.pickInfo.pickedMesh : null;
       const node = side.entityOf(mesh) ?? untrackedRootOf(mesh);
       for (const listener of pick) listener(node);
-    } else if (info.type === PointerEventTypes.POINTERUP) {
+    } else if (info.type === api.PointerEventTypes.POINTERUP) {
       for (const listener of editEnd) listener();
     }
   });
 
   return {
     engine: "Babylon.js",
-    scene,
     side,
     gizmos: true,
     formats: ["glb", "gltf", "obj", "stl", "babylon", "usdz", "usda", "usdc", "usd"],
     nativeExport: { label: ".babylon", file: "scene.babylon" },
-    start() {
-      engine.runRenderLoop(() => scene.render());
-      window.addEventListener("resize", () => engine.resize());
-    },
     onPick: (listener) => { pick.push(listener); },
     onEditEnd: (listener) => { editEnd.push(listener); },
     attachGizmo(node) {
@@ -82,10 +75,11 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
     nameOf: (node) => node.name,
     async openUntracked(file) {
       const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      const camera = scene.activeCamera;
       // A File, not its bytes: the text formats refuse an ArrayBufferView source.
-      const container = await LoadAssetContainerAsync(file, scene, { pluginExtension: `.${ext}`, name: file.name });
+      const container = await api.LoadAssetContainerAsync(file, scene, { pluginExtension: `.${ext}`, name: file.name });
       container.addAllToScene();
-      scene.activeCamera = camera;
+      if (camera) scene.activeCamera = camera;
       untracked.push(...[...container.transformNodes, ...container.meshes].filter((n) => !n.parent));
       return `opened ${file.name} in Babylon, outside the project (${container.meshes.length} meshes)`;
     },
@@ -102,13 +96,13 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
       node.dispose(false, true);
       untracked = untracked.filter((n) => n !== node);
     },
-    exportNative: async () => JSON.stringify(await SceneSerializer.SerializeAsync(scene)),
+    exportNative: async () => JSON.stringify(await api.SceneSerializer.SerializeAsync(scene)),
     addPrimitive(kind, color) {
       const name = `${kind}_${Math.random().toString(16).slice(2, 6)}`;
       const mesh = kind === "box"
-        ? MeshBuilder.CreateBox(name, { size: 1 }, scene)
-        : MeshBuilder.CreateSphere(name, { diameter: 1, segments: 16 }, scene);
-      const material = new PBRMaterial(`${name}_material`, scene);
+        ? api.MeshBuilder.CreateBox(name, { size: 1 }, scene)
+        : api.MeshBuilder.CreateSphere(name, { diameter: 1, segments: 16 }, scene);
+      const material = new api.PBRMaterial(`${name}_material`, scene);
       side.materialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
       mesh.material = material;
       side.track([mesh]);
@@ -119,13 +113,13 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
       untracked = untracked.filter((n) => n !== node);
     },
     assignMaterial(node, name) {
-      if (!(node instanceof Mesh)) return;
+      if (!(node instanceof api.Mesh)) return;
       const material = name ? side.material(name) ?? created.get(name) ?? null : null;
-      if (node.material instanceof MultiMaterial) node.material.subMaterials[0] = material;
+      if (node.material instanceof api.MultiMaterial) node.material.subMaterials[0] = material;
       else node.material = material;
     },
     createMaterial(name, state) {
-      const material = new PBRMaterial(name, scene);
+      const material = new api.PBRMaterial(name, scene);
       side.materialAdapter.write(material, state);
       created.set(material.name, material);
       return material.name;
@@ -141,10 +135,10 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): Viewport<Trans
         if (!node || node.getChildMeshes(true).some((m) => m.metadata?.marker)) continue;
         const light = entity.kind === "light";
         const marker = light
-          ? MeshBuilder.CreateSphere(`${entity.name}_marker`, { diameter: 0.3, segments: 8 }, scene)
-          : MeshBuilder.CreateBox(`${entity.name}_marker`, { width: 0.5, height: 0.35, depth: 0.25 }, scene);
-        const material = new StandardMaterial(`${entity.name}_marker`, scene);
-        material.emissiveColor = light ? new Color3(1, 0.85, 0.3) : new Color3(0.6, 0.6, 0.65);
+          ? api.MeshBuilder.CreateSphere(`${entity.name}_marker`, { diameter: 0.3, segments: 8 }, scene)
+          : api.MeshBuilder.CreateBox(`${entity.name}_marker`, { width: 0.5, height: 0.35, depth: 0.25 }, scene);
+        const material = new api.StandardMaterial(`${entity.name}_marker`, scene);
+        material.emissiveColor = light ? new api.Color3(1, 0.85, 0.3) : new api.Color3(0.6, 0.6, 0.65);
         material.disableLighting = true;
         material.wireframe = !light;
         marker.material = material;

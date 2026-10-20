@@ -351,8 +351,12 @@ export class LiteSide implements EngineSide<SceneNode, Material> {
   /** The slot list of a node, as material names (registering materials it meets). */
   slotsOf(node: SceneNode): (string | null)[] {
     const meshes = this.slotMeshes(node);
-    if (!meshes.length) return dataOf(node).bwMaterials ?? [];
-    return meshes.map((mesh) => (mesh.material === this.emptySlot ? null : this.nameOf(mesh.material)));
+    const recorded = dataOf(node).bwMaterials;
+    if (!meshes.length) return recorded ?? [];
+    const slots = meshes.map((mesh) => (mesh.material === this.emptySlot ? null : this.nameOf(mesh.material)));
+    // A mesh without slots still draws its one group with the empty material: it has no slots.
+    if (recorded?.length === 0 && slots.every((slot) => slot === null)) return [];
+    return slots;
   }
 
   /** Puts materials on a node's slot meshes by project name. */

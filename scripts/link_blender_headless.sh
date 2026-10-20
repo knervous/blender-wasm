@@ -111,7 +111,8 @@ fi
 # reads as Blender's functions rather than wasm-function[N].
 NAME_FLAGS=""; [ "${LINK_NAMES:-0}" = 1 ] && NAME_FLAGS="--profiling-funcs"
 
-FLAGS="$THREAD_FLAGS $NAME_FLAGS \
+# -lembind: the JavaScript API (blender source/creator/bw_api.cc, patches/blender).
+FLAGS="$THREAD_FLAGS $NAME_FLAGS -lembind \
   -Wl,--allow-multiple-definition \
   -sEXIT_RUNTIME=0 \
   $LINK_OPT \

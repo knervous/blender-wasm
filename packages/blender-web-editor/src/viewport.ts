@@ -3,12 +3,16 @@ import type { EngineSide, MaterialState, Rgba } from "@knervous/blender-web";
 export type GizmoMode = "position" | "rotation" | "scale";
 
 /**
- * What the editor needs from an engine: the package's core adapter for it,
- * plus the editing tools the package leaves to apps: a camera and gizmos,
- * picking, primitives, material edits, markers for Blender's lights and
- * cameras, and content loaded outside the project. All of it uses the
- * engine's own API; the adapter reads the result on the next sync.
- * `N` is the engine's node type.
+ * What the editor needs from an engine: the core adapter for it
+ * (@knervous/blender-web's BabylonSide, LiteSide or ThreeSide), plus the
+ * editing tools the core leaves to apps: gizmos, picking, primitives, material
+ * edits, markers for Blender's lights and cameras, and content loaded outside
+ * the project. All of it uses the engine's own API, on the app's own engine
+ * and scene (the app keeps its render loop); the adapter reads the result on
+ * the next sync. `N` is the engine's node type.
+ *
+ * `babylonViewport`, `liteViewport` and `threeViewport` make one; an app with
+ * another engine implements this.
  */
 export interface Viewport<N> {
   readonly engine: string;
@@ -19,7 +23,6 @@ export interface Viewport<N> {
   readonly nativeExport?: { label: string; file: string };
   /** Whether the viewport has transform gizmos. */
   readonly gizmos?: boolean;
-  start(): void | Promise<void>;
   /** A tap on the canvas: the project entity or untracked root under it, or null. */
   onPick(listener: (node: N | null) => void): void;
   /** A gizmo drag or camera move ended (time to refresh and maybe auto-sync). */

@@ -15,7 +15,9 @@
  * `threads: "auto"` (the default) takes mt where the page is isolated and st
  * everywhere else.
  */
-import type { BlenderJob, BlenderRunner, BlenderSession } from "../project/index.ts";
+import type {
+  BlenderApi, BlenderJob, BlenderObjectInfo, BlenderRunner, BlenderSession, MeshData, OperatorResult, RnaInput, RnaValue,
+} from "../project/index.ts";
 import { PROTOCOL_SOURCE } from "../project/protocol.generated.ts";
 import { loadBrotliDecoder, type BrotliDecoder } from "./brotli.ts";
 
@@ -189,9 +191,23 @@ export interface BrowserBlenderSession extends BlenderSession {
   readonly phases: Record<string, number>;
   /** The build that booted (after boot). */
   readonly flavor: Flavor | null;
+  /** Blender's direct API (embind); calls boot the session if needed. */
+  readonly api: BlenderApi;
   /** Ends the worker (and Blender); the next request boots a new one. */
   close(): void;
 }
+
+/** RPC names of the worker's embind calls (bw_api.cc). */
+type ApiMethod = "bwGet" | "bwSet" | "bwCall" | "bwPython" | "bwObjects" | "bwMesh";
+
+/** Operator idnames in either spelling: "mesh.primitive_cube_add" -> "MESH_OT_primitive_cube_add". */
+const operatorIdname = (name: string): string => {
+  const dot = name.indexOf(".");
+  return dot > 0 && !name.includes("_OT_") ? `${name.slice(0, dot).toUpperCase()}_OT_${name.slice(dot + 1)}` : name;
+};
+
+const isMeshData = (value: unknown): value is MeshData =>
+  typeof value === "object" && value !== null && "vertexCount" in value && "positions" in value;
 
 /**
  * A worker from the runtime directory. Deliberately not the bundler pattern
@@ -231,6 +247,40 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
   let booting: Promise<void> | null = null;
   const pending = new Map<string, Pending>();
   let nextId = 0;
+  const calls = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  let nextCall = 0;
+  const rpc = async (method: ApiMethod, ...args: unknown[]): Promise<unknown> => {
+    await session.boot();
+    const id = ++nextCall;
+    return new Promise((resolve, reject) => {
+      calls.set(id, { resolve, reject });
+      worker?.postMessage({ type: "api", id, method, args });
+    });
+  };
+  const json = async (method: ApiMethod, ...args: unknown[]): Promise<unknown> => {
+    const text = await rpc(method, ...args);
+    return typeof text === "string" ? JSON.parse(text) : null;
+  };
+  const api: BlenderApi = {
+    get: async (path) => {
+      const value = await json("bwGet", path);
+      return isRnaValue(value) ? value : null;
+    },
+    set: async (path, value: RnaInput) => (await rpc("bwSet", path, value)) === true,
+    call: async (operator, props = {}) => {
+      const result = await rpc("bwCall", operatorIdname(operator), props);
+      return isOperatorResult(result) ? result : "NOT_FOUND";
+    },
+    python: async (code) => (await rpc("bwPython", code)) === true,
+    objects: async () => {
+      const list = await json("bwObjects");
+      return Array.isArray(list) ? list.filter(isObjectInfo) : [];
+    },
+    mesh: async (idOrName) => {
+      const mesh = await rpc("bwMesh", idOrName);
+      return isMeshData(mesh) ? mesh : null;
+    },
+  };
   let current: string | null = null;
   let fraction = 0;
   const progress = (p: BootProgress): void => {
@@ -241,6 +291,8 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
   const fail = (error: Error): void => {
     for (const entry of pending.values()) entry.reject(error);
     pending.clear();
+    for (const call of calls.values()) call.reject(error);
+    calls.clear();
     current = null;
     worker?.terminate();
     worker = null;
@@ -249,6 +301,7 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
 
   const session: BrowserBlenderSession & { bootMs: number; compileMs: number; startMs: number; phases: Record<string, number>; flavor: Flavor | null } = {
     flavor: null,
+    api,
     bootMs: 0,
     compileMs: 0,
     startMs: 0,
@@ -281,6 +334,11 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
               pending.delete(data.id);
               current = pending.keys().next().value ?? null;
               entry?.resolve({ output: data.output, files: data.files });
+            } else if (data.type === "api") {
+              const call = calls.get(data.id);
+              calls.delete(data.id);
+              if (data.error) call?.reject(new Error(data.error));
+              else call?.resolve(data.result);
             } else if (data.type === "fatal") {
               const error = new Error(data.message);
               fail(error);
@@ -325,6 +383,18 @@ export function createBlenderSession(options: BlenderSessionOptions = {}): Brows
   };
   return session;
 }
+
+const isRnaValue = (value: unknown): value is RnaValue =>
+  value === null || ["number", "boolean", "string"].includes(typeof value)
+  || (Array.isArray(value) && value.every((v) => typeof v === "number" || typeof v === "boolean"));
+
+const isOperatorResult = (value: unknown): value is OperatorResult =>
+  value === "FINISHED" || value === "CANCELLED" || value === "PASS_THROUGH" || value === "NOT_FOUND";
+
+const KINDS = new Set(["mesh", "empty", "light", "camera", "other"]);
+const isObjectInfo = (value: unknown): value is BlenderObjectInfo =>
+  typeof value === "object" && value !== null && "name" in value && typeof value.name === "string"
+  && "kind" in value && typeof value.kind === "string" && KINDS.has(value.kind);
 
 /* ------------------------------------------------------------- one-shot runner */
 const ERROR_MARKER = "<<<BLENDER_PYTHON_ERROR>>>";

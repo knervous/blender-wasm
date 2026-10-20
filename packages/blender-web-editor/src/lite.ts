@@ -1,29 +1,21 @@
-import * as LITE from "@babylonjs/lite";
+import type * as LITE from "@babylonjs/lite";
 import { LiteSide, isMesh } from "@knervous/blender-web/lite";
 import type { GizmoMode, Viewport } from "./viewport.ts";
 
 type SceneNode = LITE.SceneNode;
 
 /**
- * Babylon Lite (WebGPU). No gizmos here: Lite's gizmos are a toolkit of their
- * own, and this viewport keeps to what the editor needs to exercise the
- * adapter (pick, add, delete, materials, adopt).
+ * The editor's view of an app's Babylon Lite scene. `api` is the app's Lite
+ * (`import * as LITE from "@babylonjs/lite"`); the engine, its scene
+ * registration and render loop stay the app's. No gizmos: Lite's gizmos are a
+ * toolkit of their own.
  */
-export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Viewport<SceneNode>> {
-  const engine = await LITE.createEngine(canvas);
-  const scene = LITE.createSceneContext(engine);
-  scene.clearColor = { r: 0.16, g: 0.16, b: 0.17, a: 1 };
-  LITE.addToScene(scene, LITE.createHemisphericLight([0, 1, 0], 0.8));
-  LITE.addToScene(scene, LITE.createDirectionalLight([-0.5, -1, -0.3], 0.9));
-  const camera = LITE.createArcRotateCamera(-Math.PI / 3, Math.PI / 3, 14, LITE.vec3(0, 0, 0));
-  LITE.addToScene(scene, camera);
-  LITE.attachControl(camera, canvas, scene);
-
-  // The adapter uses this app's Lite.
-  const side = new LiteSide(LITE, engine, scene);
+export function liteViewport(api: typeof LITE, engine: LITE.EngineContext, scene: LITE.SceneContext,
+  canvas: HTMLCanvasElement): Viewport<SceneNode> {
+  const side = new LiteSide(api, engine, scene);
   let untracked: SceneNode[] = [];
   const created = new Map<string, LITE.Material>();
-  const picker = LITE.createGpuPicker(scene);
+  const picker = api.createGpuPicker(scene);
 
   const pick: ((node: SceneNode | null) => void)[] = [];
   const editEnd: (() => void)[] = [];
@@ -38,7 +30,7 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
       return;
     }
     const rect = canvas.getBoundingClientRect();
-    const info = await LITE.pickAsync(picker, event.clientX - rect.left, event.clientY - rect.top);
+    const info = await api.pickAsync(picker, event.clientX - rect.left, event.clientY - rect.top);
     const mesh = info.hit && isMesh(info.pickedMesh) ? info.pickedMesh : null;
     let node: SceneNode | null = side.entityOf(mesh);
     if (!node && mesh) {
@@ -66,7 +58,7 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
       const at = parent.children.indexOf(node);
       if (at >= 0) parent.children.splice(at, 1);
     }
-    LITE.removeFromScene(scene, node);
+    api.removeFromScene(scene, node);
     node.parent = null;
   };
 
@@ -74,19 +66,14 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
     engine: "Babylon Lite",
     side,
     formats: ["glb", "gltf"],
-    async start() {
-      await LITE.registerScene(scene);
-      // The render loop: its promise settles only when the engine stops.
-      void LITE.startEngine(engine);
-    },
     onPick: (listener) => { pick.push(listener); },
     onEditEnd: (listener) => { editEnd.push(listener); },
     attachGizmo() {},
     setGizmoMode(_mode: GizmoMode) {},
     nameOf: (node) => node.name,
     async openUntracked(file) {
-      const container = await LITE.loadGltf(engine, file);
-      LITE.addToScene(scene, container);
+      const container = await api.loadGltf(engine, file);
+      api.addToScene(scene, container);
       const roots = container.entities.filter((e): e is SceneNode => "children" in e && "position" in e);
       untracked.push(...roots);
       return `opened ${file.name} in Babylon Lite, outside the project (${roots.reduce((n, r) => n + meshesUnder(r), 0)} meshes)`;
@@ -105,12 +92,12 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
       untracked = untracked.filter((n) => n !== node);
     },
     addPrimitive(kind, color) {
-      const mesh = kind === "box" ? LITE.createBox(engine, 1) : LITE.createSphere(engine, { diameter: 1, segments: 16 });
+      const mesh = kind === "box" ? api.createBox(engine, 1) : api.createSphere(engine, { diameter: 1, segments: 16 });
       mesh.name = `${kind}_${Math.random().toString(16).slice(2, 6)}`;
-      const material = LITE.createPbrMaterial({ name: `${mesh.name}_material` });
+      const material = api.createPbrMaterial({ name: `${mesh.name}_material` });
       side.materialAdapter.write(material, { color, metallic: 0, roughness: 0.6 });
       mesh.material = material;
-      LITE.addToScene(scene, mesh);
+      api.addToScene(scene, mesh);
       side.track([mesh]);
       return side.entityOf(mesh) ?? mesh;
     },
@@ -124,7 +111,7 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
       slot.material = (name && (side.material(name) ?? created.get(name))) || side.emptySlot;
     },
     createMaterial(name, state) {
-      const material = LITE.createPbrMaterial({ name });
+      const material = api.createPbrMaterial({ name });
       side.materialAdapter.write(material, state);
       created.set(name, material);
       return name;
@@ -139,14 +126,14 @@ export async function createLiteViewport(canvas: HTMLCanvasElement): Promise<Vie
         const node = side.node(id);
         if (!node || node.children.some((c) => c.name.endsWith("_marker"))) continue;
         const light = entity.kind === "light";
-        const marker = light ? LITE.createSphere(engine, { diameter: 0.3, segments: 8 }) : LITE.createBox(engine, 0.4);
+        const marker = light ? api.createSphere(engine, { diameter: 0.3, segments: 8 }) : api.createBox(engine, 0.4);
         marker.name = `${entity.name}_marker`;
-        marker.material = LITE.createPbrMaterial({
+        marker.material = api.createPbrMaterial({
           baseColorFactor: light ? [1, 0.85, 0.3, 1] : [0.6, 0.6, 0.65, 1], metallicFactor: 0, roughnessFactor: 1,
         });
         node.children.push(marker);
         marker.parent = node;
-        LITE.addToScene(scene, marker);
+        api.addToScene(scene, marker);
       }
     },
   };

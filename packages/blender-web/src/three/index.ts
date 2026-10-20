@@ -273,7 +273,10 @@ export class ThreeSide implements EngineSide<Object3D, Material> {
   slotsOf(node: Object3D): (string | null)[] {
     if (!(node instanceof this.api.Mesh)) return dataOf(node).bwMaterials ?? [];
     const materials: Material[] = Array.isArray(node.material) ? node.material : [node.material];
-    return materials.map((m) => (m === this.emptySlot ? null : this.nameOf(m)));
+    const slots = materials.map((m) => (m === this.emptySlot ? null : this.nameOf(m)));
+    // A mesh without slots still draws with the empty material: it has no slots.
+    if (dataOf(node).bwMaterials?.length === 0 && slots.every((slot) => slot === null)) return [];
+    return slots;
   }
 
   /** Puts materials on a node's slots by project name. */

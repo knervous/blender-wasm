@@ -21,15 +21,17 @@ The package carries the runtime (`runtime/`, brotli) in two builds:
 page is isolated and `st` everywhere else.
 
 This is the core: the runtime, the project model and an adapter per engine.
-Editors, gizmos and tools are for apps to build on top; `demos/editor` in the
-repository is one example.
+Editors, gizmos and tools are for apps to build on top;
+[`@knervous/blender-web-editor`](../blender-web-editor) is one (a HUD over
+any of the three engines), and `demos/editor` in the repository uses it.
 
 ## Entries
 
 | import | what |
 |---|---|
 | `@knervous/blender-web` | `Project`, typed changes, translators, hooks, `MemoryScene`, the shared description's types |
-| `@knervous/blender-web/browser` | `createBlenderSession` (persistent, with boot progress), `createBlenderRunner` (a run per call), `runtimeInstalled` |
+| `@knervous/blender-web/browser` | `createBlenderSession` (persistent, with boot progress and `session.api`), `createBlenderRunner` (a run per call), `runtimeInstalled` |
+| `@knervous/blender-web/ui` | `createBlenderUi`, `showBlenderUi`, `returnFromBlenderUi`: the full Blender UI in an iframe, swapped in and out |
 | `@knervous/blender-web/babylon` | `BabylonSide`: entities as `TransformNode`s |
 | `@knervous/blender-web/lite` | `LiteSide`: entities as Lite scene nodes, a mesh per material slot |
 | `@knervous/blender-web/three` | `ThreeSide`: entities as `Object3D`s |
@@ -62,6 +64,53 @@ back the same way. `side.track(nodes)` brings engine content into the
 project (a loaded glTF, or meshes you made), keeping how it looks.
 `side.node(id)`, `idOf`, `entityOf` and `material(name)` map between engine
 objects and the project.
+
+## Blender's API, direct
+
+Besides Python (`project.sync({ script })`), a session exposes typed calls
+straight into Blender's RNA through embind, with no interpreter in the way.
+They run on Blender's own thread between requests (proxied under pthreads,
+called directly in the single-threaded build) and take well under a
+millisecond each:
+
+```ts
+const api = session.api;
+await api.get('objects["Cube"].location');              // [0, 0, 0]
+await api.set('objects["Cube"].location', [1, 2, 3]);   // true; runs the RNA update
+await api.call("mesh.primitive_monkey_add", { location: [0, -3, 1] });  // "FINISHED"
+await api.objects();                                     // [{ id, name, kind, parent }]
+await api.mesh("Suzanne");                               // evaluated, glTF space, grouped by slot
+await api.python("bpy.context.scene.frame_set(12)");     // false if it raised
+```
+
+Paths are `bpy.data` paths (`objects["Cube"].modifiers["row"].count`,
+`materials["orange"].roughness`). What these calls change is Blender's scene,
+so the next `project.sync()` brings it to the engine like any Blender edit.
+This is the layer to build a framework-specific editor on; the project model
+keeps both sides in step underneath.
+
+## The full Blender UI
+
+`/ui` puts Blender's own interface (the fork's headed WebGPU build) in an
+iframe behind a typed bridge, and swaps it with your engine view on the same
+.blend:
+
+```ts
+import { createBlenderUi, showBlenderUi, returnFromBlenderUi } from "@knervous/blender-web/ui";
+
+const ui = createBlenderUi({ url: "https://blender-ui.example.com/", container });
+await showBlenderUi(project, ui);        // hands over project.exportBlend(), shows it
+const result = await returnFromBlenderUi(project, ui);  // saves, hides, project.adoptBlend()
+```
+
+Boot it at startup: it stays transparent and inert until shown (not
+`display: none`, which would stop it drawing), so a swap takes tens of
+milliseconds. Coming back is an ordinary sync: only what was edited in the UI
+reaches the engine. The UI site is `./build.sh web` (`demo/dist/`). Host it
+with the headers in `demo/public/_headers`. `Document-Isolation-Policy`
+there lets it run its threads inside any page, isolated or not. Messages
+are checked by origin and source, and `parent=` tells the UI which origin
+may drive it.
 
 ## With Vite
 
@@ -139,7 +188,7 @@ file is checked against the runtime's sha256 manifest on install.
   CDN serving the package works as `runtimeUrl`:
 
   ```ts
-  createBlenderSession({ runtimeUrl: "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.2/runtime/" });
+  createBlenderSession({ runtimeUrl: "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/" });
   ```
 
   A CDN sends the `.br` files as plain bytes (browsers decode brotli only as

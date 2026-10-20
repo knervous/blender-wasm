@@ -29,6 +29,32 @@ mkdir -p "$DIST"
 if [ "$FLAVOR" = web ]; then
   [ -f "$ROOT/demo/public/blender.wasm.zst" ] || die "no release link in demo/public — run ./build.sh web first"
   ( cd "$ROOT/demo" && { [ -d node_modules ] || npm ci || npm install; } && npm run build )
+  # Static hosts cap file sizes (Cloudflare Pages: 25 MiB). Files over 24 MiB
+  # go up in parts, listed in manifest.json, which the page joins (fetchZst).
+  python3 - "$ROOT/demo/dist" <<'PY'
+import json, os, sys
+dist = sys.argv[1]
+limit = 24 * 1024 * 1024
+manifest_path = os.path.join(dist, "manifest.json")
+manifest = json.load(open(manifest_path))
+parts, part_bytes = {}, {}
+for name in sorted(os.listdir(dist)):
+    path = os.path.join(dist, name)
+    if not os.path.isfile(path) or os.path.getsize(path) <= limit:
+        continue
+    data = open(path, "rb").read()
+    names = []
+    for i in range(0, len(data), limit):
+        part = f"{name}.part{i // limit}"
+        open(os.path.join(dist, part), "wb").write(data[i:i + limit])
+        names.append(part)
+    os.remove(path)
+    parts[name], part_bytes[name] = names, len(data)
+    print(f"split {name} ({len(data) / 1048576:.1f} MB) into {len(names)} parts")
+if parts:
+    manifest["parts"], manifest["partBytes"] = parts, part_bytes
+    json.dump(manifest, open(manifest_path, "w"), indent=2)
+PY
   out="$DIST/blender-web-$FORK_REV.tar.gz"
   tar -C "$ROOT/demo" -czf "$out" dist
   log "packaged $out ($(du -h "$out" | cut -f1))"

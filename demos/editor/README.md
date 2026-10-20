@@ -1,7 +1,9 @@
 # Blender editor (Babylon.js, Babylon Lite or three.js)
 
 A small editor with Blender running in the same tab, compiled to
-WebAssembly, on [`@knervous/blender-web`](../../packages/blender-web).
+WebAssembly. The page sets up its engine and mounts
+[`@knervous/blender-web-editor`](../../packages/blender-web-editor) over it,
+on [`@knervous/blender-web`](../../packages/blender-web).
 `?engine=lite` uses Babylon Lite (WebGPU, no gizmos), `?engine=three` three.js; Babylon.js is the default. `?threads=0` forces the single-threaded build, `?threads=1` the pthread one. Open a `.blend` (or
 anything Blender imports) and edit it in the engine. Moves, deletions, new
 objects, material assignment and material colour, metallic and roughness all
@@ -15,13 +17,15 @@ npm install
 npm run dev              # http://localhost:5321  (?engine=lite|three, ?threads=0|1)
 ```
 
-The three engines, the package and Vite are dev dependencies. The package
-is linked from this repository (`../../packages/blender-web`, built by
-`predev`), and its build takes the runtimes from `../../dist/`. A first
+The three engines, the packages and Vite are dev dependencies. The packages
+come from this repository (`../../packages/`, built and copied in by
+`predev`; `.npmrc` installs them as copies, as a registry would, so there is
+one copy of each engine), and the core's build takes the runtimes from
+`../../dist/`. A first
 `./build.sh browser` compiles Blender from source, which takes hours (see the
 top-level README).
 `npm run blender:ui` links the full Blender UI (`../../build.sh web`) for
-"Open in Blender UI".
+the "Blender UI" swap (`?ui=<url>` uses a hosted one instead).
 
 ## How Blender runs
 

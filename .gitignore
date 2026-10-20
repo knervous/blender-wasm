@@ -15,6 +15,7 @@
 /wasm-sysroot/
 /wasm-sysroot-st/
 /build-blender-st/
+/build-blender-gui/
 /numpy-build-st/
 /browser-st/
 /.stamps-st/

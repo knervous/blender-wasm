@@ -8,14 +8,40 @@
  *
  * in:  { type: "boot", runtimeUrl, flavor, wasmModule, dataPackage, server }
  *      { type: "request", id, request, files, blend? }
+ *      { type: "api", id, method, args }  an embind call (bw_api.cc), between requests
  * out: { type: "phase", name, ms } (glueLoaded, instantiated, preRun, runtimeInitialized,
  *      firstLine, python) | { type: "ready", marks } | { type: "line", text }
  *      { type: "response", id, files, output } | { type: "fatal", message }
+ *      { type: "api", id, result } | { type: "api", id, error }
  *
  * Response files are keyed as a one-shot run writes them (/out/report.json,
  * /out/geo/<id>.bin, /out/session.blend), so the page decodes both the same way.
  */
 let FS = null;
+/** The module, for its embind API (the factory's promise never settles: main() never returns). */
+let blender = null;
+const API = new Set(["bwVersion", "bwGet", "bwSet", "bwCall", "bwPython", "bwObjects", "bwMesh"]);
+
+/* An embind call. Blender runs it on its own thread between requests: the
+ * pthread build proxies it there (this thread waits), and in the
+ * single-threaded build this handler only runs while Blender is suspended in
+ * its poll loop. JSON results are parsed on the page; a mesh's arrays view wasm
+ * memory, so they are copied out and transferred. */
+function api({ id, method, args }) {
+  try {
+    if (!ready || !blender || !API.has(method)) throw new Error(`Blender API ${method} unavailable`);
+    const result = blender[method](...args);
+    if (method === "bwMesh" && result) {
+      const copy = { vertexCount: result.vertexCount, groups: result.groups,
+        positions: result.positions.slice(), normals: result.normals.slice(), uvs: result.uvs?.slice() };
+      self.postMessage({ type: "api", id, result: copy }, [copy.positions.buffer, copy.normals.buffer, ...(copy.uvs ? [copy.uvs.buffer] : [])]);
+      return;
+    }
+    self.postMessage({ type: "api", id, result });
+  } catch (error) {
+    self.postMessage({ type: "api", id, error: error instanceof Error ? error.message : String(error) });
+  }
+}
 let ready = false;
 const queue = [];
 let current = null; // { id, lines }
@@ -124,6 +150,10 @@ function print(text) {
 }
 
 self.onmessage = ({ data }) => {
+  if (data.type === "api") {
+    api(data);
+    return;
+  }
   if (data.type === "request") {
     queue.push(data);
     next();
@@ -159,11 +189,12 @@ self.onmessage = ({ data }) => {
       preRun: [(module) => {
         mark("preRun");
         FS = module.FS;
+        blender = module;
         module.ENV.BLENDER_SYSTEM_RESOURCES = "/5.3";
         module.ENV.HOME = "/tmp";
-        // Single-threaded build: Blender's main runs this between JSPI sleeps,
-        // which is when this worker's messages (requests) are handled.
-        if (flavor === "st") module.ENV.BLENDER_WASM_POLL = "__bw_poll__()";
+        // Blender's main runs this between sleeps (bw_api's calls run there too);
+        // in the single-threaded build the sleep is when this worker's messages run.
+        module.ENV.BLENDER_WASM_POLL = "__bw_poll__()";
         mkdirp("/ipc");
         FS.writeFile("/ipc/server.py", 'print("<<<BW_PYTHON>>>", flush=True)\nBW_SERVER = True\n' + server);
       }],

@@ -14,7 +14,7 @@
 import { ZSTDDecoder } from "zstddec";
 /* A host page can embed this runtime as an isolated, same-origin editing
  * surface; see embed.js for the protocol. */
-import { embed, onSaveRequest, postToParent } from "./embed.js";
+import { embed, hostFile, onParentRequest, postToParent } from "./embed.js";
 
 /* ---- Splash UI: progress bar + startup console (ported from gecko-wasm's
  * demo/chrome/src/main.ts). ---- */
@@ -112,20 +112,30 @@ function renderDownloads() {
     message: "Downloading Blender",
   });
 }
-/* Stream `url` with progress into `dl[key]`, return the compressed bytes. */
+/* Stream `url` with progress into `dl[key]`, return the compressed bytes. A
+ * file packaged in parts (manifest.parts, for hosts with a per-file size limit)
+ * is fetched part by part and joined. */
 async function fetchZst(url, key) {
-  const r = await fetch(url);
-  if (!r.ok || !r.body) throw new Error(`${url}: HTTP ${r.status}`);
-  dl[key].total = Number(r.headers.get("Content-Length")) || 0;
-  const reader = r.body.getReader();
+  const urls = manifest.parts?.[url] ?? [url];
   const chunks = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    dl[key].loaded += value.byteLength;
-    renderDownloads();
+  for (const part of urls) {
+    const r = await fetch(part);
+    if (!r.ok || !r.body) throw new Error(`${part}: HTTP ${r.status}`);
+    if (urls.length === 1) dl[key].total = Number(r.headers.get("Content-Length")) || 0;
+    else dl[key].total = manifest.partBytes?.[url] ?? 0;
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      dl[key].loaded += value.byteLength;
+      renderDownloads();
+    }
   }
+  return joinChunks(chunks, key);
+}
+
+function joinChunks(chunks, key) {
   if (!dl[key].total) dl[key].total = dl[key].loaded;
   renderDownloads();
   const out = new Uint8Array(dl[key].loaded);
@@ -459,7 +469,17 @@ window.addEventListener(
  * transfer a snapshot to the parent, which decides what to do with it
  * (validate, export, version). */
 async function snapshotForParent() {
-  if (!embed.sessionUrl || !window.Module?.FS) throw new Error("No embedded session is open");
+  if (!window.Module?.FS) throw new Error("Blender is not running");
+  // Builds with host hooks save straight to the path; older ones take Ctrl+S below.
+  const direct = hostFile("save", embed.sessionPath);
+  if (direct) {
+    await direct;
+    const bytes = window.Module.FS.readFile(embed.sessionPath);
+    const snapshot = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    postToParent("snapshot", { session: snapshot }, [snapshot]);
+    return;
+  }
+  if (!embed.sessionUrl) throw new Error("No embedded session is open");
   canvas.focus();
   // WasmFS reports mtime as a number of seconds (the JS FS as a Date), and a
   // save inside the same second keeps it, so size is part of the stamp too.
@@ -510,7 +530,18 @@ async function snapshotForParent() {
   postToParent("snapshot", { session: snapshot }, [snapshot]);
 }
 
-onSaveRequest(snapshotForParent);
+/* Open a .blend the parent hands over, without reloading (a swap back into the UI). */
+async function openFromParent({ session }) {
+  if (!window.Module?.FS) throw new Error("Blender is not running");
+  if (!(session instanceof ArrayBuffer)) throw new Error("blender-embed-open needs a session ArrayBuffer");
+  window.Module.FS.writeFile(embed.sessionPath, new Uint8Array(session));
+  const opened = hostFile("load", embed.sessionPath);
+  if (!opened) throw new Error("This Blender build cannot open files on request; reload it with ?session=");
+  await opened;
+  postToParent("opened");
+}
+
+onParentRequest({ save: snapshotForParent, open: openFromParent });
 
 /* ---- File ▸ Open hijack: a REAL, lazy mount (no copying) of a folder the
  * user picks on their machine. Blender's wm_open_mainfile invoke (wasm build)

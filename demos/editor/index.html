@@ -7,114 +7,11 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- The app's own engine canvas; @knervous/blender-web-editor docks its HUD over it. -->
     <main id="stage">
       <canvas id="viewport"></canvas>
-      <div id="drop-hint">Drop a .blend, .glb, .babylon, .obj, .fbx …</div>
-      <div id="ui-panel" hidden>
-        <div class="ui-bar">
-          <strong>Blender UI</strong>
-          <span id="ui-status"></span>
-          <span class="spacer"></span>
-          <button id="ui-save">Save back to <span data-engine-name></span></button>
-          <button id="ui-close">Close</button>
-        </div>
-        <iframe id="ui-frame" title="Blender"></iframe>
-      </div>
+      <nav id="engines" class="engines"></nav>
     </main>
-    <aside>
-      <header>
-        <h1 id="title">Blender editor</h1>
-        <nav id="engines" class="engines"></nav>
-        <p class="hint">Blender: <span id="runtime">…</span></p>
-        <p id="status">Starting…</p>
-        <div id="boot-progress" class="progress" hidden><div id="boot-fill"></div></div>
-      </header>
-
-      <section>
-        <h2>Open</h2>
-        <div class="row">
-          <button id="new-blender">New Blender scene</button>
-          <label class="button">Open file…<input id="open" type="file" hidden
-            accept=".blend,.glb,.gltf,.babylon,.obj,.fbx,.stl,.ply,.usdz,.usda,.usdc" /></label>
-        </div>
-        <p class="hint">.blend and anything Blender imports open as the project. Shift+open a glTF/OBJ/STL (or a .babylon/USD in Babylon.js) to load it into <span data-engine-name></span> only, outside the project until you adopt it.</p>
-      </section>
-
-      <section>
-        <h2>Blender UI</h2>
-        <div class="row"><button id="ui-open">Open in Blender UI</button></div>
-        <p class="hint">The full Blender interface on WebGPU, in this tab. It opens the current .blend; "Save back" makes your edits the session again.</p>
-      </section>
-
-      <section>
-        <h2>Sync</h2>
-        <div class="row">
-          <button id="sync">Sync with Blender</button>
-          <label class="hint inline"><input id="auto-sync" type="checkbox" /> Auto-sync after edits</label>
-        </div>
-        <ul id="pending"></ul>
-        <p class="hint">Only what changed crosses: <span data-engine-name></span>'s edits since the last sync go to Blender, and only what Blender changed comes back, mesh data included only where geometry changed.</p>
-      </section>
-
-      <section>
-        <h2>Edit in <span data-engine-name></span></h2>
-        <div class="row" id="gizmo-modes">
-          <button data-mode="position" data-key="w" class="on">Move (W)</button>
-          <button data-mode="rotation" data-key="e">Rotate (E)</button>
-          <button data-mode="scale" data-key="r">Scale (R)</button>
-        </div>
-        <div class="row">
-          <button id="add-box">Add box</button>
-          <button id="add-sphere">Add sphere</button>
-          <button id="delete">Delete</button>
-          <button id="adopt">Adopt outside content</button>
-        </div>
-        <div id="material-panel" class="material" hidden>
-          <div class="row">
-            <label class="hint inline">Material <select id="mat-name"></select></label>
-            <button id="mat-new">New</button>
-          </div>
-          <div class="row">
-            <label class="hint inline">Colour <input id="mat-color" type="color" /></label>
-            <label class="hint inline">Metallic <input id="mat-metallic" type="range" min="0" max="1" step="0.05" /></label>
-            <label class="hint inline">Roughness <input id="mat-roughness" type="range" min="0" max="1" step="0.05" /></label>
-          </div>
-        </div>
-        <p class="hint">Blender's lights and cameras show as markers; the editor's own lights light the scene.</p>
-        <ul id="outliner"></ul>
-      </section>
-
-      <section>
-        <h2>Python in Blender</h2>
-        <textarea id="python" spellcheck="false">import bpy
-bpy.ops.mesh.primitive_monkey_add(location=(0, -3, 1.5))
-monkey = bpy.context.object
-for face in monkey.data.polygons:
-    face.use_smooth = True
-array = monkey.modifiers.new("row", "ARRAY")
-array.count = 3
-array.relative_offset_displace = (1.4, 0, 0)
-mat = bpy.data.materials.new("orange")
-mat.use_nodes = True
-mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.9, 0.35, 0.05, 1)
-monkey.data.materials.append(mat)</textarea>
-        <div class="row"><button id="run-python">Run (Ctrl+Enter)</button></div>
-      </section>
-
-      <section>
-        <h2>Download</h2>
-        <div class="row">
-          <button id="dl-blend">.blend</button>
-          <button id="dl-glb">.glb</button>
-          <button id="dl-native">.babylon</button>
-        </div>
-      </section>
-
-      <section class="grow">
-        <h2>Blender output</h2>
-        <pre id="log"></pre>
-      </section>
-    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
