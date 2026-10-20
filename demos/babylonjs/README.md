@@ -1,39 +1,35 @@
 # Blender ⇄ Babylon
 
-A small Babylon.js editor with headless Blender on the other end. Open a
-`.blend` (or anything Blender imports) and edit it in Babylon. Your moves and
-deletions push back onto the Blender objects. You can also run `bpy` against
-the scene, or load Babylon content and send the whole Babylon scene into
-Blender.
+A small Babylon.js editor with Blender running in the same tab, compiled to
+WebAssembly. Open a `.blend` (or anything Blender imports) and edit it in
+Babylon. Your moves and deletions push back onto the Blender objects. You can
+also run `bpy` against the scene, or load Babylon content and send the whole
+Babylon scene into Blender.
 
 ```bash
 npm install
-npm run blender   # builds or reuses ../../dist/blender-wasm-{browser,node}
+npm run blender   # builds or reuses ../../dist/blender-wasm-browser
 npm run dev       # http://localhost:5321
 ```
 
-`npm run blender` reuses the packages in `../../dist/` when they exist and
-otherwise runs `../../build.sh browser` and `../../build.sh node`. A first build
-compiles Blender from source, which takes hours (see the top-level README).
-`npm run blender:browser` and `npm run blender:node` each prepare one of them.
+`npm run blender` reuses `../../dist/blender-wasm-browser/` when it exists and
+otherwise runs `../../build.sh browser`. A first build compiles Blender from
+source, which takes hours (see the top-level README). It installs the runtime
+into `public/blender-runtime/`.
 
-## Where Blender runs
+## How Blender runs
 
-The **Blender runs** selector lists the runtimes that are installed:
+Blender is the headless browser runtime: the pthread build, linked for
+`web,worker`. The page assumes cross-origin isolation (COOP `same-origin` +
+COEP `require-corp`), because Blender's threads need `SharedArrayBuffer`. The
+dev and preview servers send those headers, and any static host must send them
+too.
 
-- **In this tab (WebAssembly worker).** This is the browser runtime. The page
-  compiles `blender.wasm` and fetches the data package once. Each operation
-  then runs in a fresh worker that gets the compiled module, because Blender's
-  `main()` never returns and an instance is good for one run. The worker is
-  terminated afterwards, along with its pthreads. This needs the page to be
-  cross-origin isolated; the dev and preview servers send the COOP/COEP
-  headers.
-- **On the dev server (Node).** This is the Node runtime behind `/api/blender/run`,
-  one process per run. Only `npm run dev` provides it. A static `vite build`
-  has the browser runtime only.
-
-Both backends answer the same call: a Python script against an optional
-`.blend`, returning what it printed and every file it wrote under `/out`.
+The page compiles `blender.wasm` and fetches the data package once. Each
+operation then runs in a fresh worker that gets the compiled module, because
+Blender's `main()` never returns and an instance is good for one run. The
+worker spawns Blender's pthreads, and terminating it afterwards reclaims both
+(`public/blender-worker.js`, `src/blender.js`). Nothing runs on a server.
 
 ## How the two sides stay in step
 

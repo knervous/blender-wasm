@@ -14,12 +14,12 @@ import {
 } from "@babylonjs/core";
 import "@babylonjs/loaders";
 import { GLTF2Export } from "@babylonjs/serializers";
-import { availableBackends, BlenderPythonError, browserBackend, serverBackend } from "./blender.js";
+import { BlenderPythonError, createBlender, runtimeInstalled } from "./blender.js";
 import { BLENDER_FORMATS, createSession } from "./session.js";
 
 const $ = (id) => document.getElementById(id);
 const ui = {
-  backend: $("backend"), status: $("status"), log: $("log"), outliner: $("outliner"),
+  runtime: $("runtime"), status: $("status"), log: $("log"), outliner: $("outliner"),
   linkState: $("link-state"), python: $("python"),
 };
 
@@ -183,7 +183,7 @@ async function blenderTask(label, task) {
   try {
     const result = await task();
     if (result?.glb) await showBlenderScene(result.glb);
-    setStatus(`${label}: done in ${((performance.now() - started) / 1000).toFixed(1)} s (${session.backend})`);
+    setStatus(`${label}: done in ${((performance.now() - started) / 1000).toFixed(1)} s`);
     if (result?.report) log(`[scene] ${result.report.objects.map((o) => o.name).join(", ") || "(empty)"}`);
   } catch (error) {
     if (error instanceof BlenderPythonError) log(error.traceback);
@@ -313,34 +313,24 @@ $("dl-blend").onclick = () => session?.blend ? download("scene.blend", session.b
 $("dl-glb").onclick = () => lastGlb ? download("scene.glb", lastGlb, "model/gltf-binary") : setStatus("No Blender export yet");
 $("dl-babylon").onclick = async () => download("scene.babylon", JSON.stringify(await SceneSerializer.SerializeAsync(scene)), "application/json");
 
-function useBackend(name) {
-  const backend = name === "browser"
-    ? browserBackend({ onProgress: (text) => setStatus(text, "busy") })
-    : serverBackend();
-  session = createSession(backend, { onLine: (line) => { if (line.trim()) log(line); } });
-}
-
 async function boot() {
   engine.runRenderLoop(() => scene.render());
   window.addEventListener("resize", () => engine.resize());
   renderOutliner();
-  if (!crossOriginIsolated) log("warning: page is not cross-origin isolated; the browser runtime needs COOP/COEP");
-  const backends = await availableBackends();
-  for (const [name, label] of [["browser", "in this tab (WebAssembly worker)"], ["server", "on the dev server (Node)"]]) {
-    if (!backends[name]) continue;
-    ui.backend.append(new Option(label, name));
-  }
-  if (!ui.backend.options.length) {
-    ui.backend.append(new Option("not installed", ""));
-    setStatus("No Blender runtime: run `npm run blender` (see README). Babylon-only editing still works.", "error");
+  if (!crossOriginIsolated) {
+    setStatus("This page is not cross-origin isolated (COOP/COEP); Blender's threads cannot start.", "error");
     return;
   }
-  ui.backend.onchange = () => {
-    const blend = session?.blend;
-    useBackend(ui.backend.value);
-    if (blend) void blenderTask("Move the session to the new backend", () => session.open("session.blend", blend));
-  };
-  useBackend(ui.backend.value);
+  const manifest = await runtimeInstalled();
+  if (!manifest) {
+    ui.runtime.textContent = "not installed";
+    setStatus("Blender's browser runtime is not installed: run `npm run blender` (see README). Babylon-only editing still works.", "error");
+    return;
+  }
+  ui.runtime.textContent = `WebAssembly in this tab · build ${manifest.forkRevision}`;
+  session = createSession(createBlender({ onProgress: (text) => setStatus(text, "busy") }), {
+    onLine: (line) => { if (line.trim()) log(line); },
+  });
   await blenderTask("New Blender scene", () => session.newScene());
 }
 

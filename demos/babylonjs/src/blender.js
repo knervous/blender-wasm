@@ -1,13 +1,11 @@
-/* Headless Blender, from the page's point of view: one call runs a Python
- * script against an optional .blend and returns what it printed and every file
- * it wrote under /out.
+/* Headless Blender, compiled to WebAssembly, running in this tab. One call runs
+ * a Python script against an optional .blend and returns what it printed and
+ * every file it wrote under /out.
  *
- * Two backends answer the same call:
- *   browser  the browser runtime (public/blender-runtime/, `npm run blender:browser`)
- *            in a worker per run; the wasm is compiled and the data package
- *            fetched once per page.
- *   server   the Node runtime (`npm run blender:node`) behind the dev server's
- *            /api/blender/run.
+ * The runtime is public/blender-runtime/ (`npm run blender`). The page compiles
+ * blender.wasm and fetches the data package once; each run gets a fresh worker
+ * fed that compiled module, because Blender's main() never returns and an
+ * instance is good for one run.
  */
 export const COMPLETION_MARKER = "<<<BLENDER_RUN_COMPLETE>>>";
 const ERROR_MARKER = "<<<BLENDER_PYTHON_ERROR>>>";
@@ -43,19 +41,19 @@ function checkOutput(output) {
   }
 }
 
-export async function availableBackends() {
+/** The installed runtime's manifest, or null when none is installed. */
+export async function runtimeInstalled() {
   try {
-    const status = await (await fetch("/api/blender/status")).json();
-    return { browser: status.browser, server: status.node };
+    const response = await fetch("blender-runtime/manifest.json", { cache: "no-store" });
+    if (!response.ok || !(response.headers.get("content-type") ?? "").includes("json")) return null;
+    return await response.json();
   } catch {
-    // Static hosting (vite build): only the browser runtime can exist.
-    const browser = (await fetch("blender-runtime/blender.js", { method: "HEAD" })).ok;
-    return { browser, server: false };
+    return null;
   }
 }
 
-/** In-browser backend. `onLine` receives Blender's output as it prints. */
-export function browserBackend({ onProgress = () => {} } = {}) {
+/** `run({ code, blendFile, files, onLine })`; `onLine` receives Blender's output as it prints. */
+export function createBlender({ onProgress = () => {} } = {}) {
   const runtimeUrl = new URL("blender-runtime/", document.baseURI).href;
   let assets;
   const load = () => (assets ??= (async () => {
@@ -68,7 +66,6 @@ export function browserBackend({ onProgress = () => {} } = {}) {
   })());
 
   return {
-    name: "browser",
     async run({ code, blendFile, files = {}, onLine = () => {} }) {
       const { wasmModule, dataPackage } = await load();
       const staged = { ...files, "/job/main.py": encoder.encode(WRAPPER), "/job/user.py": encoder.encode(code) };
@@ -98,39 +95,6 @@ export function browserBackend({ onProgress = () => {} } = {}) {
         // main() never returns; terminating reclaims the module and its pthreads.
         worker.terminate();
       }
-    },
-  };
-}
-
-const toBase64 = (bytes) => {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
-};
-const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
-
-/** Dev-server backend: the Node runtime, one process per run. */
-export function serverBackend() {
-  return {
-    name: "server",
-    async run({ code, blendFile, files = {}, onLine = () => {} }) {
-      const body = { code, blendFile, files: {} };
-      for (const [path, bytes] of Object.entries(files)) body.files[path] = toBase64(bytes);
-      const response = await fetch("/api/blender/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const result = await response.json();
-      for (const line of (result.output ?? "").split("\n")) onLine(line);
-      if (result.error) {
-        const at = result.error.indexOf("Blender Python error:");
-        if (at >= 0) throw new BlenderPythonError(result.error.slice(at + 21), result.output);
-        throw Object.assign(new Error(result.error), { output: result.output });
-      }
-      const out = {};
-      for (const [path, base64] of Object.entries(result.files)) out[path] = fromBase64(base64);
-      return { output: result.output, files: out };
     },
   };
 }

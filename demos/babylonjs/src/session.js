@@ -73,7 +73,7 @@ print("moved", len(moved), "object(s):", ", ".join(moved))
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export function createSession(backend, { onLine } = {}) {
+export function createSession(blender, { onLine } = {}) {
   let blend = null; // the authoritative scene
   let busy = Promise.resolve();
 
@@ -81,7 +81,7 @@ export function createSession(backend, { onLine } = {}) {
     const job = busy.then(async () => {
       const staged = { ...files };
       if (useSession && blend) staged["/in/session.blend"] = blend;
-      const result = await backend.run({
+      const result = await blender.run({
         code: code + "\n" + EPILOGUE,
         blendFile: useSession && blend ? "/in/session.blend" : undefined,
         files: staged,
@@ -100,7 +100,6 @@ export function createSession(backend, { onLine } = {}) {
 
   return {
     get blend() { return blend; },
-    get backend() { return backend.name; },
 
     newScene: () => run("", { useSession: false }),
 

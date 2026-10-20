@@ -96,9 +96,8 @@ The protocol is `postMessage` with `blender-embed-*` messages, documented in
 
 [`demos/babylonjs`](demos/babylonjs) is a Babylon.js editor wired to headless
 Blender in both directions. Edits in Babylon push back onto the `.blend`, and
-`bpy` scripts and Blender imports show up in Babylon. Blender runs either in
-the tab, from the browser runtime, or through the Node runtime behind its dev
-server.
+`bpy` scripts and Blender imports show up in Babylon. Blender runs in the tab:
+it uses the pthread browser runtime and assumes cross-origin isolation.
 
 ## Optimising and compressing
 
