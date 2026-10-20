@@ -49,7 +49,19 @@ cmd=$(cmake_link_cmd "$WEB/blender.js")
 # export (static ctors, html5 event callbacks, main-loop ticks) throws
 # SuspendError on the first exception-guarded call. Select readback needs a
 # different design (CPU raycast fallback or cached async readback).
+# CPython's archive carries its own expat (build_python.sh folds pyexpat's
+# objects in) and OpenImageIO pulls the standalone libexpat: the first
+# definition is taken, as in link_blender_headless.sh.
+# $GL: emscripten 6 asserts at startup that OFFSCREENCANVAS_SUPPORT has the GL
+# library linked, which a WebGPU-only build otherwise drops (the canvas
+# transfer to the render pthread then aborts). Quoted to survive the eval.
+# --use-port=emdawnwebgpu: the WebGPU bindings (wgpuCreateInstance, ...). The
+# gpu module compiles with the port, but nothing puts it on CMake's link line,
+# and without it the backend aborts at startup on a missing function.
 WEB_FLAGS="-pthread \
+  -Wl,--allow-multiple-definition \
+  -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE='\$GL' \
+  --use-port=emdawnwebgpu \
   -sEXIT_RUNTIME=0 -g2 \
   $LINK_OPT \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=1073741824 -sMAXIMUM_MEMORY=4294967296 \
@@ -62,7 +74,7 @@ WEB_FLAGS="-pthread \
   --preload-file $STAGE/python3.13@$SYSROOT/lib/python3.13"
 
 echo ">> relinking blender → $WEB/blender.js (web + WebGPU)"
-( cd "$BLENDER_BUILD" && eval "$cmd $WEB_FLAGS" )
+( cd "$BLENDER_BUILD" && eval "$cmd $EXTRA_LINK_LIBS $WEB_FLAGS" )
 
 ls -la "$WEB"/blender.js "$WEB"/blender.wasm "$WEB"/blender.data 2>&1
 echo ">> done"

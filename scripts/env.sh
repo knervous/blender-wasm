@@ -55,6 +55,10 @@ if [ "$HOST_OS" = "Darwin" ]; then
     done
   done
   for prefix in $BREW_PREFIXES; do GNU_PATH="$GNU_PATH:$prefix/bin:$prefix/sbin"; done
+  # BSD tar writes AppleDouble ._* files for extended attributes; packaged
+  # runtime tarballs (assets.tar) must not carry them.
+  export COPYFILE_DISABLE=1
+
   # The host compiler is needed for native tools (CPython's build-python,
   # shader_tool). A broken or mismatched Xcode selection can leave it unable to
   # link even though `xcrun` finds it (e.g. Xcode's linker against a newer

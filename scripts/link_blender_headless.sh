@@ -58,8 +58,7 @@
 #   the standalone libexpat; the two collide on xmlparse/xmltok. Deleting
 #   CPython's copy instead corrupts its builtin module table (`import bpy` dies).
 #
-# * brotli: freetype is built with woff2 and decompresses Blender's .woff2 UI
-#   fonts at startup; CMake's link line omits the brotli archives.
+# * brotli: see EXTRA_LINK_LIBS in link_common.sh.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/link_common.sh"
 
@@ -86,7 +85,6 @@ python3 "$ROOT/scripts/patch_gltf_ctypes.py" "$STAGE"
 stage_numpy "$STAGE/python3.13"
 log "scripts=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/scripts"|cut -f1) datafiles=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/datafiles"|cut -f1) py=$(du -sh "$STAGE/python3.13"|cut -f1)"
 
-BROTLI_LIBS="$SYSROOT/lib/libbrotlidec.a $SYSROOT/lib/libbrotlicommon.a"
 
 FLAGS="-pthread \
   -Wl,--allow-multiple-definition \
@@ -108,7 +106,7 @@ link_once() {
   cmd=$(cmake_link_cmd "$OUT/blender.js")
   stub=$(undef_stub_object)
   log "relinking blender -> $OUT/blender.js ($TARGET, headless, $LINK_OPT)"
-  ( cd "$BLENDER_BUILD" && eval "$cmd $BROTLI_LIBS $stub $FLAGS" ) 2>&1 | tee "$OUT/link.log"
+  ( cd "$BLENDER_BUILD" && eval "$cmd $EXTRA_LINK_LIBS $stub $FLAGS" ) 2>&1 | tee "$OUT/link.log"
 }
 
 # Unresolved symbols the glue stubs with an abort-on-call; `daemon` has always

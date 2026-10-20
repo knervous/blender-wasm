@@ -24,6 +24,12 @@ cmake_link_cmd() {
   printf '%s' "$cmd"
 }
 
+# Libraries every Blender relink adds to CMake's line. freetype is built with
+# woff2 and decompresses Blender's .woff2 UI fonts through brotli, which the
+# CMake link line omits ("missing function: BrotliDecoderDecompress" at the
+# first font load).
+EXTRA_LINK_LIBS="$SYSROOT/lib/libbrotlidec.a $SYSROOT/lib/libbrotlicommon.a"
+
 # stage_assets <stage-dir> <python-subdir>
 # Copies Blender's runtime data (scripts + datafiles) to <stage>/<version>/ and
 # the trimmed CPython stdlib to <stage>/<python-subdir>/.
