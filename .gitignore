@@ -31,6 +31,8 @@
 
 # CMake / ninja build dirs
 /build-blender/
+/build-gui/
+/build-headless/
 /build-cycles/
 
 # npm
