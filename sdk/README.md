@@ -67,6 +67,45 @@ Measured in the Babylon demo, with Blender as browser wasm in the tab, at about
 | Python bevels the cube | 0 | 1 mesh |
 | sync with nothing changed | 0 | 0 |
 
+## A persistent Blender (session)
+
+`protocol.py` also runs as a server (`BW_SERVER = True` before its source).
+Blender boots once and runs an endless request loop. The scene stays in
+memory: there is no module instantiation, Python start, or `.blend`
+load/save per request. A request loads a `.blend` or a fresh scene only when
+it asks, and `Project.exportBlend()` writes the file on demand (the Blender
+UI handoff and downloads use it). Fingerprints are recomputed only for
+objects whose geometry signature changed, or that a persistent
+`depsgraph_update_post` handler reported as updated, so an in-place vertex
+edit by a script is caught as well. Requests and responses pass as files in
+the module FS, announced by printed markers.
+
+Give `Project` a `session` (a `BlenderSession`, such as the demo's
+`createBlenderSession` over `public/blender-session-worker.js`) instead of a
+one-shot `blender` runner. Both remain supported.
+
+Same scenario, browser, `bench.html?mode=session` against the per-request
+modes. Blender stays alive for the session, booted once:
+
+| operation | legacy | sdk, a run per request | session |
+|---|---|---|---|
+| move 1 object | 5.4 s | 5.6 s | 5–11 ms |
+| bevel 1 object (mesh comes back) | 5.7 s | 5.8 s | 42–126 ms |
+| recolour 1 material | 5.5 s | 5.8 s | 39–43 ms |
+| idle sync | 5.8 s | 5.5 s | 5–8 ms |
+| setup: 36 objects by script | 6.0 s | 2 × ~6 s | 1.0 s |
+| JS heap after the run | 296 MB | 293 MB | 128–135 MB |
+
+The heap drops because the session worker owns the data package; the
+one-shot modes keep it in the page and copy it into every run. Booting the
+session costs 4.5 s in the demo and 7.5 s in a headless Node harness, on a
+quiet machine. Measured under heavy load from other work, it took 33 s,
+almost all of it Blender's own start, while the operations above stayed
+the same. Most of a bevel's time is evaluating and encoding that mesh, and
+most of a script's time is `bpy.ops` (about 77 ms per primitive operator).
+`docs/embind-api-audit.md` maps what a direct C/embind interface could take
+over from here.
+
 ## Against the previous whole-scene path
 
 `demos/babylonjs/bench.html` runs one scenario both ways on the same in-tab
@@ -179,6 +218,5 @@ scene's business until it adopts it into the project.
   replaces the other's.
 - **Lights and cameras** move as entities. Their light and camera properties
   are not in the shared description yet.
-- **Granularity.** Every sync is one Blender run, about 4 s in the browser,
-  mostly startup. The project queues runs, and the demo's auto-sync debounces
-  edits into one.
+- **Granularity.** With a session, a sync costs milliseconds plus its work.
+  With a one-shot runner, every sync is a full Blender run (about 5.5 s).

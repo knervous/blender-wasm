@@ -98,7 +98,10 @@ export interface RunReport {
   missing: string[];
   log: string[];
   output: string;
-  blend: Uint8Array;
+  /** The session .blend, when the run saved one (always for one-shot runs). */
+  blend?: Uint8Array;
+  /** Seconds since the request started, at the end of each phase (Blender's clock). */
+  timings: Record<string, number>;
   files: Record<string, Uint8Array>;
 }
 
@@ -122,6 +125,22 @@ export interface BlenderRunner {
     code: string;
     blendFile?: string;
     files: Record<string, Uint8Array>;
+    onLine?: (line: string) => void;
+  }): Promise<{ output: string; files: Record<string, Uint8Array> }>;
+}
+
+/**
+ * A persistent Blender serving protocol.py requests (server mode): booted
+ * once, it keeps the scene in memory, so a request costs only its own work.
+ * `load` replaces the session first; `save` writes /out/session.blend.
+ * Files come back keyed as a one-shot run writes them (/out/...).
+ */
+export interface BlenderSession {
+  request(request: {
+    job: BlenderJob;
+    files: Record<string, Uint8Array>;
+    load?: { kind: "factory" | "empty" } | { kind: "blend"; bytes: Uint8Array };
+    save?: boolean;
     onLine?: (line: string) => void;
   }): Promise<{ output: string; files: Record<string, Uint8Array> }>;
 }

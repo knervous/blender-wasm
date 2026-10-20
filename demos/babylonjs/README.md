@@ -26,11 +26,11 @@ COEP `require-corp`), because Blender's threads need `SharedArrayBuffer`. The
 dev and preview servers send those headers, and any static host must send them
 too.
 
-The page compiles `blender.wasm` and fetches the data package once. Each
-operation then runs in a fresh worker that gets the compiled module, because
-Blender's `main()` never returns and an instance is good for one run. The
-worker spawns Blender's pthreads, and terminating it afterwards reclaims both
-(`public/blender-worker.js`, `src/blender.js`). Nothing runs on a server.
+Blender boots once, in one worker (`public/blender-session-worker.js`,
+`createBlenderSession` in `src/blender.ts`), with the project protocol running
+as a server. It stays alive for the page, keeping the scene in memory, so a sync
+takes milliseconds plus its work. The `.blend` is written only when needed (the
+Blender UI, downloads). Nothing runs on a server.
 
 ## How the two sides stay in step
 
@@ -60,7 +60,8 @@ The status line and log show each sync's traffic, for example
 
 - No OpenSubdiv, so Subdivision Surface does nothing. Array, Bevel, Mirror and
   the other non-subdivision modifiers work.
-- Each sync is one Blender run, about 4 s, mostly Blender's startup.
+- Booting Blender takes a few seconds once per page; syncs after that take
+  milliseconds (see `sdk/README.md`).
 - Mesh edits made in Babylon travel only when an object is created; see the
   limits in `sdk/README.md`.
 - `bench.html?mode=sdk|legacy` measures the sync against the previous

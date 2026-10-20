@@ -7,7 +7,7 @@
  * fed that compiled module, because Blender's main() never returns and an
  * instance is good for one run.
  */
-import type { BlenderRunner } from "../../../sdk/project/index.ts";
+import type { BlenderJob, BlenderRunner, BlenderSession } from "../../../sdk/project/index.ts";
 
 export const COMPLETION_MARKER = "<<<BLENDER_RUN_COMPLETE>>>";
 const ERROR_MARKER = "<<<BLENDER_PYTHON_ERROR>>>";
@@ -107,4 +107,98 @@ export function createBlender({ onProgress = (_text: string) => {} } = {}): Blen
       }
     },
   };
+}
+
+/**
+ * A persistent Blender in one worker (public/blender-session-worker.js), booted
+ * once with protocol.py in server mode. Requests then cost only their own work.
+ * If the worker dies (an abort), the next request boots a new one; the session
+ * scene is lost with it, so callers should reopen their .blend.
+ */
+export function createBlenderSession({
+  server,
+  onProgress = (_text: string) => {},
+}: { server: string; onProgress?: (text: string) => void }): BlenderSession & {
+  boot(): Promise<void>;
+  /** Boot phases in ms: fetch + compile of the module and data, then Blender's own start. */
+  bootMs: number;
+  compileMs: number;
+  startMs: number;
+} {
+  const runtimeUrl = new URL("blender-runtime/", document.baseURI).href;
+  type Pending = { resolve: (r: { output: string; files: Record<string, Uint8Array> }) => void; reject: (e: Error) => void; onLine?: (line: string) => void };
+  let worker: Worker | null = null;
+  let booting: Promise<void> | null = null;
+  const pending = new Map<string, Pending>();
+  let nextId = 0;
+  let current: string | null = null;
+
+  const session = {
+    bootMs: 0,
+    compileMs: 0,
+    startMs: 0,
+    boot(): Promise<void> {
+      booting ??= (async () => {
+        const started = performance.now();
+        onProgress("compiling blender.wasm and starting Blender (once)");
+        const [wasmModule, dataPackage] = await Promise.all([
+          WebAssembly.compileStreaming(fetch(runtimeUrl + "blender.wasm")),
+          fetch(runtimeUrl + "blender.data").then((r) => r.arrayBuffer()),
+        ]);
+        session.compileMs = performance.now() - started;
+        const w = new Worker(new URL("blender-session-worker.js", document.baseURI));
+        worker = w;
+        await new Promise<void>((resolve, reject) => {
+          w.onmessage = ({ data }) => {
+            if (data.type === "ready") {
+              session.bootMs = performance.now() - started;
+              session.startMs = session.bootMs - session.compileMs;
+              resolve();
+            }
+            else if (data.type === "line") { if (current) pending.get(current)?.onLine?.(data.text); }
+            else if (data.type === "response") {
+              const entry = pending.get(data.id);
+              pending.delete(data.id);
+              current = pending.keys().next().value ?? null;
+              entry?.resolve({ output: data.output, files: data.files });
+            } else if (data.type === "fatal") {
+              const error = new Error(data.message);
+              for (const entry of pending.values()) entry.reject(error);
+              pending.clear();
+              w.terminate();
+              worker = null;
+              booting = null;
+              reject(error);
+            }
+          };
+          w.postMessage({ type: "boot", runtimeUrl, wasmModule, dataPackage, server }, [dataPackage]);
+        });
+      })();
+      return booting;
+    },
+    async request(request: {
+      job: BlenderJob;
+      files: Record<string, Uint8Array>;
+      load?: { kind: "factory" | "empty" } | { kind: "blend"; bytes: Uint8Array };
+      save?: boolean;
+      onLine?: (line: string) => void;
+    }): Promise<{ output: string; files: Record<string, Uint8Array> }> {
+      await session.boot();
+      const id = String(++nextId);
+      const blend = request.load?.kind === "blend" ? request.load.bytes : undefined;
+      const load = request.load && request.load.kind !== "blend" ? request.load : undefined;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject, onLine: request.onLine });
+        current ??= id;
+        worker?.postMessage({
+          type: "request",
+          id,
+          request: { job: request.job, save: Boolean(request.save), ...(load ? { load } : {}) },
+          files: request.files,
+          blend,
+        });
+      });
+    },
+  };
+  return session;
 }

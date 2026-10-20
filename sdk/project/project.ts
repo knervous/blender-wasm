@@ -3,7 +3,7 @@ import {
   defaultTranslators, materialPropertiesTranslator, type FieldTranslator, type MaterialTranslator,
 } from "./translators.ts";
 import type {
-  BlenderCommand, BlenderJob, BlenderRunner, Change, Conflict, ConflictSubject, Direction, EntityState, Field,
+  BlenderCommand, BlenderJob, BlenderRunner, BlenderSession, Change, Conflict, ConflictSubject, Direction, EntityState, Field,
   MaterialState, MeshData, RunReport, SceneSide, Side, Snapshot,
 } from "./types.ts";
 
@@ -46,7 +46,10 @@ export interface ProjectPlugin {
 }
 
 export interface ProjectOptions {
-  blender: BlenderRunner;
+  /** A persistent Blender: requests cost only their own work. Preferred. */
+  session?: BlenderSession;
+  /** Or one Blender run per request (opens and saves the .blend each time). */
+  blender?: BlenderRunner;
   scene: SceneSide;
   /** sdk/project/protocol.py, as text. */
   protocol: string;
@@ -73,6 +76,13 @@ export interface SyncResult {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** Blender raised while handling a request (bad script, failed command). */
+export class ProjectRunError extends Error {
+  constructor(readonly traceback: string, readonly output: string) {
+    super(traceback.trim().split("\n").at(-1) ?? "Blender request failed");
+  }
+}
+
 /**
  * A working project with Blender on one side and an engine scene on the
  * other. Blender's .blend is the persistent truth; `agreed` is the last state
@@ -89,6 +99,7 @@ export class Project {
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProjectOptions) {
+    if (!options.session && !options.blender) throw new Error("Project needs a Blender session or runner");
     for (const plugin of options.plugins ?? []) this.use(plugin);
   }
 
@@ -99,9 +110,24 @@ export class Project {
     return this;
   }
 
-  /** The current .blend, or null before the first run. */
+  /**
+   * The last .blend Blender wrote, or null. With a session this is only
+   * refreshed by exportBlend(); use that when the file must be current.
+   */
   get blend(): Uint8Array | null {
     return this.blendBytes;
+  }
+
+  /** The session as a .blend, including the scene's pending edits (synced first). */
+  async exportBlend(): Promise<Uint8Array> {
+    if (!this.options.session) {
+      await this.sync();
+      if (!this.blendBytes) throw new Error("no .blend yet");
+      return this.blendBytes;
+    }
+    const result = await this.enqueue(() => this.run({ blend: null, sendPending: true, save: true }));
+    if (!result.report.blend) throw new Error("Blender wrote no .blend");
+    return result.report.blend;
   }
 
   /** The last state both sides agreed on. */
@@ -120,7 +146,7 @@ export class Project {
 
   /** Blender's default startup scene; replaces the session and the scene's entities. */
   newScene(): Promise<SyncResult> {
-    return this.enqueue(() => this.run({ blend: null, commands: [], fresh: true }));
+    return this.enqueue(() => this.run({ blend: null, commands: [], fresh: true, load: "factory" }));
   }
 
   /**
@@ -139,14 +165,17 @@ export class Project {
       blend: null,
       commands: [],
       fresh: true,
-      script: `import bpy\nbpy.ops.wm.read_factory_settings(use_empty=True)\npath = ${JSON.stringify(path)}\n${importer}`,
+      load: "empty",
+      script: `import bpy\npath = ${JSON.stringify(path)}\n${importer}`,
       files: { [path]: bytes },
     }));
   }
 
   /** Send the scene's pending edits, run an optional script, take Blender's results. */
   sync(options: SyncOptions = {}): Promise<SyncResult> {
-    return this.enqueue(() => this.run({ blend: this.blendBytes, sendPending: true, ...options }));
+    // A session keeps the scene; a one-shot run reopens the last .blend.
+    const blend = this.options.session ? null : this.blendBytes;
+    return this.enqueue(() => this.run({ blend, sendPending: true, ...options }));
   }
 
   /**
@@ -250,6 +279,9 @@ export class Project {
     commands?: BlenderCommand[];
     sendPending?: boolean;
     fresh?: boolean;
+    /** Replace the session with Blender's startup scene or an empty one (when no blend). */
+    load?: "factory" | "empty";
+    save?: boolean;
     script?: string;
     files?: Record<string, Uint8Array>;
   }): Promise<SyncResult> {
@@ -275,15 +307,30 @@ export class Project {
       reportGeometry: true,
     };
     for (const plugin of this.plugins) job = plugin.hooks?.beforeRun?.(job) ?? job;
-    files["/job/project.json"] = encoder.encode(JSON.stringify(job));
-    if (request.blend) files["/in/session.blend"] = request.blend;
 
-    const result = await this.options.blender.run({
-      code: this.options.protocol,
-      blendFile: request.blend ? "/in/session.blend" : undefined,
-      files,
-      onLine: this.options.onLine,
-    });
+    let result: { output: string; files: Record<string, Uint8Array> };
+    const session = this.options.session;
+    if (session) {
+      const load = request.blend
+        ? { kind: "blend" as const, bytes: request.blend }
+        : request.load ? { kind: request.load } : undefined;
+      result = await session.request({ job, files, load, save: request.save, onLine: this.options.onLine });
+    } else if (this.options.blender) {
+      // One-shot: the run opens the .blend from argv and always saves.
+      if (request.load === "empty" && job.script) {
+        job = { ...job, script: `import bpy\nbpy.ops.wm.read_factory_settings(use_empty=True)\n${job.script}` };
+      }
+      files["/job/project.json"] = encoder.encode(JSON.stringify(job));
+      if (request.blend) files["/in/session.blend"] = request.blend;
+      result = await this.options.blender.run({
+        code: this.options.protocol,
+        blendFile: request.blend ? "/in/session.blend" : undefined,
+        files,
+        onLine: this.options.onLine,
+      });
+    } else {
+      throw new Error("no Blender");
+    }
     const report = decodeReport(result);
     for (const plugin of this.plugins) plugin.hooks?.afterRun?.(report);
     for (const conflict of report.conflicts) {
@@ -300,7 +347,7 @@ export class Project {
     for (const plugin of this.plugins) plugin.hooks?.afterApply?.(received, "toScene");
 
     this.agreedState = report.snapshot;
-    this.blendBytes = report.blend;
+    if (report.blend) this.blendBytes = report.blend;
     return { sent, received, report };
   }
 }
@@ -348,6 +395,8 @@ export function decodeMesh(bytes: Uint8Array, meta: GeometryMeta): MeshData {
 }
 
 interface ReportJson {
+  error?: string;
+  timings?: Record<string, number>;
   entities: Record<string, EntityState>;
   materials: Record<string, MaterialState>;
   geometry: Record<string, GeometryMeta>;
@@ -357,7 +406,10 @@ interface ReportJson {
 }
 
 function decodeReport(result: { output: string; files: Record<string, Uint8Array> }): RunReport {
-  const json: ReportJson = JSON.parse(decoder.decode(result.files["/out/report.json"]));
+  const raw = result.files["/out/report.json"];
+  if (!raw) throw new ProjectRunError("Blender wrote no report", result.output);
+  const json: ReportJson = JSON.parse(decoder.decode(raw));
+  if (json.error) throw new ProjectRunError(json.error, result.output);
   const geometry: Record<string, MeshData> = {};
   for (const [id, meta] of Object.entries(json.geometry)) {
     const bytes = result.files[`/out/geo/${id}.bin`];
@@ -371,6 +423,7 @@ function decodeReport(result: { output: string; files: Record<string, Uint8Array
     log: json.log,
     output: result.output,
     blend: result.files["/out/session.blend"],
+    timings: json.timings ?? {},
     files: result.files,
   };
 }

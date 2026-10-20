@@ -16,11 +16,12 @@ import {
 } from "@babylonjs/core";
 import "@babylonjs/loaders";
 import protocol from "../../../sdk/project/protocol.py?raw";
-import { Project, type BlenderRunner } from "../../../sdk/project/index.ts";
+import { Project, type BlenderRunner, type BlenderSession } from "../../../sdk/project/index.ts";
 import { BabylonSide } from "./babylon-side.ts";
-import { createBlender, runtimeInstalled } from "./blender.ts";
+import { createBlender, createBlenderSession, runtimeInstalled } from "./blender.ts";
 
-const mode = new URLSearchParams(location.search).get("mode") === "legacy" ? "legacy" : "sdk";
+const requested = new URLSearchParams(location.search).get("mode");
+const mode = requested === "legacy" || requested === "session" ? requested : "sdk";
 document.getElementById("mode")!.textContent = mode;
 const status = (text: string): void => { document.getElementById("status")!.textContent = text; };
 
@@ -47,6 +48,23 @@ class MeteredRunner implements BlenderRunner {
   }
 }
 
+/** The same metering around a persistent session's requests. */
+class MeteredSession implements BlenderSession {
+  last: Run = { ms: 0, bytesIn: 0, bytesOut: 0 };
+  constructor(private readonly inner: BlenderSession) {}
+  async request(request: Parameters<BlenderSession["request"]>[0]): ReturnType<BlenderSession["request"]> {
+    const started = performance.now();
+    const result = await this.inner.request(request);
+    const blendIn = request.load?.kind === "blend" ? request.load.bytes.byteLength : 0;
+    this.last = {
+      ms: performance.now() - started,
+      bytesIn: size(request.files) + JSON.stringify(request.job).length + blendIn,
+      bytesOut: size(result.files),
+    };
+    return result;
+  }
+}
+
 const counts = { meshesCreated: 0, meshesDisposed: 0, geometriesCreated: 0, geometriesDisposed: 0 };
 scene.onNewMeshAddedObservable.add(() => counts.meshesCreated++);
 scene.onMeshRemovedObservable.add(() => counts.meshesDisposed++);
@@ -61,7 +79,7 @@ interface Step {
 }
 const steps: Step[] = [];
 
-async function measure(name: string, runner: MeteredRunner, work: () => Promise<void>): Promise<void> {
+async function measure(name: string, runner: { last: Run }, work: () => Promise<void>): Promise<void> {
   status(`${name}…`);
   const before = { ...counts };
   const started = performance.now();
@@ -169,9 +187,11 @@ async function legacy(runner: MeteredRunner): Promise<void> {
   }
 }
 
-async function sdk(runner: MeteredRunner): Promise<void> {
+async function sdk(runner: MeteredRunner | MeteredSession): Promise<void> {
   const side = new BabylonSide(scene);
-  const project = new Project({ blender: runner, scene: side, protocol });
+  const project = runner instanceof MeteredSession
+    ? new Project({ session: runner, scene: side, protocol })
+    : new Project({ blender: runner, scene: side, protocol });
   const move = async (name: string): Promise<void> => {
     const entity = Object.values(side.read()).find((e) => e.name === name);
     const node = entity && side.node(entity.id);
@@ -200,11 +220,24 @@ function render(): void {
 async function main(): Promise<void> {
   if (!crossOriginIsolated) { status("not cross-origin isolated"); return; }
   if (!(await runtimeInstalled())) { status("browser runtime not installed (npm run blender)"); return; }
-  const runner = new MeteredRunner(createBlender({ onProgress: status }));
-  // Warm the runtime once (compile + data fetch), outside the measurements.
-  status("warming the runtime…");
-  await runner.run({ code: "print('warm')\n", files: {} });
-  await (mode === "legacy" ? legacy(runner) : sdk(runner));
+  let bootMs = 0;
+  if (mode === "session") {
+    const live = createBlenderSession({ server: protocol, onProgress: status });
+    // Boot once (compile, data, Blender start), reported apart from the steps.
+    status("booting the session…");
+    await live.boot();
+    bootMs = live.bootMs;
+    Object.assign(window, { __boot: { compileMs: live.compileMs, startMs: live.startMs } });
+    await sdk(new MeteredSession(live));
+  } else {
+    const runner = new MeteredRunner(createBlender({ onProgress: status }));
+    // Warm the runtime once (compile + data fetch), outside the measurements.
+    status("warming the runtime…");
+    const warm = performance.now();
+    await runner.run({ code: "print('warm')\n", files: {} });
+    bootMs = performance.now() - warm;
+    await (mode === "legacy" ? legacy(runner) : sdk(runner));
+  }
 
   status("measuring memory (measureUserAgentSpecificMemory may wait for a GC)…");
   let uaMemoryMB: number | null = null;
@@ -218,10 +251,10 @@ async function main(): Promise<void> {
     ]);
     if (result) uaMemoryMB = result.bytes / 1048576;
   }
-  const summary = { mode, steps, finalHeapMB: heap() / 1048576, uaMemoryMB, sceneMeshes: scene.meshes.length, geometries: scene.geometries.length, counts };
+  const summary = { mode, bootMs, steps, finalHeapMB: heap() / 1048576, uaMemoryMB, sceneMeshes: scene.meshes.length, geometries: scene.geometries.length, counts };
   Object.assign(window, { __bench: summary });
   document.getElementById("memory")!.textContent =
-    `JS heap ${summary.finalHeapMB.toFixed(1)} MB · page memory ${uaMemoryMB?.toFixed(1) ?? "n/a"} MB · ${summary.sceneMeshes} meshes, ${summary.geometries} geometries`;
+    `boot/warm ${(bootMs / 1000).toFixed(1)} s · JS heap ${summary.finalHeapMB.toFixed(1)} MB · page memory ${uaMemoryMB?.toFixed(1) ?? "n/a"} MB · ${summary.sceneMeshes} meshes, ${summary.geometries} geometries`;
   status("done");
 }
 

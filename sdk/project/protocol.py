@@ -1,17 +1,26 @@
 # Blender side of the project protocol (see sdk/README.md).
 #
-# One run: open the session .blend (Blender's argv), apply the job's commands,
-# run the job's script, then report the whole scene in the shared description
-# and write mesh data only for objects whose geometry fingerprint differs from
-# what the caller already has. Everything crosses in glTF space (Y up, right
-# handed); Blender's Z-up is converted here and nowhere else.
+# A request: apply the job's commands, run the job's script, then report the
+# whole scene in the shared description and write mesh data only for objects
+# whose geometry fingerprint differs from what the caller already has.
+# Everything crosses in glTF space (Y up, right handed); Blender's Z-up is
+# converted here and nowhere else.
 #
-# /job/project.json  { commands, script, known: {id: geometryHash}, handlers: {name: source},
-#                      reportGeometry: bool }
-# /job/geo/<id>.bin  mesh data for create commands
-# /out/report.json   { entities, materials, geometry, conflicts, missing, log }
-# /out/geo/<id>.bin  mesh data for changed geometry
-# /out/session.blend the new session
+# job                  { commands, script, known: {id: geometryHash}, handlers: {name: source},
+#                        reportGeometry: bool }
+# /job/geo/<id>.bin    mesh data for create commands
+# <out>/report.json    { entities, materials, geometry, conflicts, missing, log }
+# <out>/geo/<id>.bin   mesh data for changed geometry
+# <out>/session.blend  the session, when the request asks for it
+#
+# Two ways to run it:
+#   one-shot  Blender opens the session .blend from argv, handles
+#             /job/project.json into /out and saves (a run per request).
+#   server    (BW_SERVER = True before this source) Blender boots once and
+#             serves requests from /ipc/request.json for as long as it lives:
+#             the scene stays in memory, a .blend is loaded or saved only when a
+#             request asks, and fingerprints are recomputed only for geometry
+#             the depsgraph reports changed. See serve().
 #
 # NumPy buffers are 32-bit throughout: foreach_get/foreach_set and the binary
 # payloads are float32/int32, never the 64-bit defaults.
@@ -19,19 +28,21 @@ import bpy
 import hashlib
 import json
 import os
+import time
+import traceback
 import uuid
 
 import numpy as np
 from mathutils import Matrix, Quaternion, Vector
 
-JOB = json.load(open("/job/project.json"))
 TO_GLTF = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0), (0, 0, 0, 1)))
 FROM_GLTF = TO_GLTF.inverted()
 EPS = 1e-5
 KINDS = {"MESH": "mesh", "EMPTY": "empty", "LIGHT": "light", "CAMERA": "camera"}
-LOG = []
 
-os.makedirs("/out/geo", exist_ok=True)
+# Per-request state, reset by handle().
+LOG, CONFLICTS, MISSING = [], [], []
+OUT = "/out"
 
 
 # --- identity -------------------------------------------------------------------
@@ -240,7 +251,6 @@ def ensure_material(name, props):
 
 
 # --- commands ---------------------------------------------------------------------
-CONFLICTS, MISSING = [], []
 
 
 def cmd_create(cmd, by_id):
@@ -311,47 +321,166 @@ def cmd_material(cmd, by_id):
     LOG.append(f"material {cmd['name']}")
 
 
-HANDLERS = {"create": cmd_create, "delete": cmd_delete, "update": cmd_update, "material": cmd_material}
+BUILTIN_HANDLERS = {"create": cmd_create, "delete": cmd_delete, "update": cmd_update, "material": cmd_material}
 
-# Plugin handlers: each source defines handle(cmd, by_id, api).
+# Plugin handlers: each source defines handle(cmd, by_id, api). Compiled once per source.
 API = {"read_entity": read_entity, "write_transform": write_transform, "log": LOG.append,
        "TO_GLTF": TO_GLTF, "FROM_GLTF": FROM_GLTF}
-for name, source in JOB.get("handlers", {}).items():
-    scope = {}
-    exec(compile(source, f"<handler {name}>", "exec"), scope)
-    HANDLERS[name] = (lambda handle: lambda cmd, by_id: handle(cmd, by_id, API))(scope["handle"])
+_COMPILED = {}
 
 
-def main():
+def handlers_for(job):
+    handlers = dict(BUILTIN_HANDLERS)
+    for name, source in job.get("handlers", {}).items():
+        if source not in _COMPILED:
+            scope = {}
+            exec(compile(source, f"<handler {name}>", "exec"), scope)
+            _COMPILED[source] = scope["handle"]
+        handlers[name] = (lambda handle: lambda cmd, by_id: handle(cmd, by_id, API))(_COMPILED[source])
+    return handlers
+
+
+# --- fingerprint cache (server mode) -----------------------------------------------
+# bw_id -> (signature, meta). A cached fingerprint is reused while the object's
+# signature holds and the depsgraph has not reported a geometry update for it.
+FINGERPRINTS = {}
+DIRTY_OBJECTS, DIRTY_MESHES = set(), set()
+TRACKING = False
+
+
+def geometry_signature(obj):
+    data = obj.data
+    return (data.name, len(data.vertices), len(data.polygons),
+            tuple((m.name, m.type, m.show_viewport) for m in obj.modifiers))
+
+
+@bpy.app.handlers.persistent
+def _track_updates(scene, depsgraph):
+    for update in depsgraph.updates:
+        if not update.is_updated_geometry:
+            continue
+        idb = getattr(update.id, "original", update.id)
+        if isinstance(idb, bpy.types.Object):
+            DIRTY_OBJECTS.add(idb.name)
+        elif isinstance(idb, bpy.types.Mesh):
+            DIRTY_MESHES.add(idb.name)
+
+
+@bpy.app.handlers.persistent
+def _forget(*_args):
+    FINGERPRINTS.clear()
+    DIRTY_OBJECTS.clear()
+    DIRTY_MESHES.clear()
+
+
+def fingerprint(obj, entity_id_, known, depsgraph):
+    """meta (with hash) for obj, writing mesh data when the caller lacks it."""
+    signature = geometry_signature(obj)
+    cached = FINGERPRINTS.get(entity_id_)
+    clean = (TRACKING and cached is not None and cached[0] == signature
+             and obj.name not in DIRTY_OBJECTS and obj.data.name not in DIRTY_MESHES)
+    if clean and known.get(entity_id_) == cached[1]["hash"]:
+        return cached[1], False
+    payload = mesh_payload(obj, depsgraph)
+    if not payload:
+        FINGERPRINTS.pop(entity_id_, None)
+        return None, False
+    meta, data = payload
+    FINGERPRINTS[entity_id_] = (signature, meta)
+    if known.get(entity_id_) == meta["hash"]:
+        return meta, False
+    with open(f"{OUT}/geo/{entity_id_}.bin", "wb") as handle:
+        handle.write(data)
+    return meta, True
+
+
+# --- a request -------------------------------------------------------------------
+def handle(job, out, save):
+    global OUT
+    OUT = out
+    LOG.clear()
+    CONFLICTS.clear()
+    MISSING.clear()
+    os.makedirs(f"{OUT}/geo", exist_ok=True)
+    timings = {}
+    started = time.perf_counter()
+
+    handlers = handlers_for(job)
     by_id = objects_by_id()
-    for cmd in JOB.get("commands", []):
-        HANDLERS[cmd["op"]](cmd, by_id)
+    for cmd in job.get("commands", []):
+        handlers[cmd["op"]](cmd, by_id)
+    timings["commands"] = time.perf_counter() - started
 
-    if JOB.get("script"):
-        exec(compile(JOB["script"], "<script>", "exec"), {"__name__": "__main__", "bpy": bpy})
+    if job.get("script"):
+        exec(compile(job["script"], "<script>", "exec"), {"__name__": "__main__", "bpy": bpy})
+    timings["script"] = time.perf_counter() - started
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    known = JOB.get("known", {})
+    known = job.get("known", {})
     entities, geometry, used = {}, {}, set()
     for obj in bpy.context.scene.objects:
         entity = read_entity(obj)
         used.update(m for m in entity["materials"] if m)
-        if obj.type == "MESH" and JOB.get("reportGeometry", True):
-            payload = mesh_payload(obj, depsgraph)
-            if payload:
-                meta, data = payload
+        if obj.type == "MESH" and job.get("reportGeometry", True):
+            meta, written = fingerprint(obj, entity["id"], known, depsgraph)
+            if meta:
                 entity["geometry"] = meta["hash"]
-                if known.get(entity["id"]) != meta["hash"]:
-                    with open(f"/out/geo/{entity['id']}.bin", "wb") as handle:
-                        handle.write(data)
+                if written:
                     geometry[entity["id"]] = meta
         entities[entity["id"]] = entity
+    DIRTY_OBJECTS.clear()
+    DIRTY_MESHES.clear()
+    timings["report"] = time.perf_counter() - started
 
     materials = {name: read_material(bpy.data.materials[name]) for name in used if name in bpy.data.materials}
-    bpy.ops.wm.save_as_mainfile(filepath="/out/session.blend", check_existing=False)
+    if save:
+        bpy.ops.wm.save_as_mainfile(filepath=f"{OUT}/session.blend", check_existing=False, copy=True)
+    timings["save"] = time.perf_counter() - started
     json.dump({"entities": entities, "materials": materials, "geometry": geometry,
-               "conflicts": CONFLICTS, "missing": MISSING, "log": LOG,
-               "blender": bpy.app.version_string}, open("/out/report.json", "w"))
+               "conflicts": CONFLICTS, "missing": MISSING, "log": LOG, "timings": timings,
+               "blender": bpy.app.version_string}, open(f"{OUT}/report.json", "w"))
 
 
-main()
+# --- server mode -----------------------------------------------------------------
+REQUEST = "/ipc/request.json"
+
+
+def load(spec):
+    """Replace the session: a staged .blend, Blender's startup scene, or an empty one."""
+    if spec["kind"] == "blend":
+        bpy.ops.wm.open_mainfile(filepath=spec["path"], load_ui=False)
+    else:
+        # The server started with --factory-startup, so the home file is the
+        # factory scene; read_factory_settings would also reset preferences and
+        # re-register every add-on (slow, and noisy tracebacks).
+        bpy.ops.wm.read_homefile(use_empty=spec["kind"] == "empty", load_ui=False)
+    _forget()
+
+
+def serve():
+    global TRACKING
+    TRACKING = True
+    bpy.app.handlers.depsgraph_update_post.append(_track_updates)
+    bpy.app.handlers.load_post.append(_forget)
+    print("<<<BW_READY>>>", flush=True)
+    while True:
+        if not os.path.exists(REQUEST):
+            time.sleep(0.001)
+            continue
+        request = json.load(open(REQUEST))
+        os.remove(REQUEST)
+        out = f"/ipc/out/{request['id']}"
+        os.makedirs(out, exist_ok=True)
+        try:
+            if request.get("load"):
+                load(request["load"])
+            handle(request["job"], out, save=request.get("save", False))
+        except BaseException:
+            json.dump({"error": traceback.format_exc()}, open(f"{out}/report.json", "w"))
+        print(f"<<<BW_DONE {request['id']}>>>", flush=True)
+
+
+if globals().get("BW_SERVER"):
+    serve()
+else:
+    handle(json.load(open("/job/project.json")), "/out", save=True)

@@ -15,10 +15,10 @@ import {
 import "@babylonjs/loaders";
 import protocol from "../../../sdk/project/protocol.py?raw";
 import {
-  BLENDER_IMPORTS, Project, type Change, type Conflict, type ProjectPlugin, type SyncResult,
+  BLENDER_IMPORTS, Project, ProjectRunError, type Change, type Conflict, type ProjectPlugin, type SyncResult,
 } from "../../../sdk/project/index.ts";
 import { BabylonSide } from "./babylon-side.ts";
-import { BlenderPythonError, createBlender, runtimeInstalled } from "./blender.js";
+import { createBlenderSession, runtimeInstalled } from "./blender.ts";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -101,11 +101,11 @@ async function blenderTask(label: string, task: (p: Project) => Promise<SyncResu
   actionButtons().forEach((b) => { b.disabled = true; });
   try {
     const { sent, received } = await task(project);
-    const seconds = ((performance.now() - started) / 1000).toFixed(1);
-    setStatus(`${label}: done in ${seconds} s · sent ${sent.length}, received ${received.length}`);
+    const ms = Math.round(performance.now() - started);
+    setStatus(`${label}: done in ${ms} ms · sent ${sent.length}, received ${received.length}`);
     log(`[sync] sent ${sent.length ? sent.map(describe).join(", ") : "nothing"} · received ${received.length ? received.map(describe).join(", ") : "nothing"}`);
   } catch (error) {
-    if (error instanceof BlenderPythonError) log(error.traceback);
+    if (error instanceof ProjectRunError) log(error.traceback);
     setStatus(`${label} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     console.error(error);
   } finally {
@@ -317,13 +317,16 @@ const uiFrame = $<HTMLIFrameElement>("ui-frame");
 const uiStatus = $("ui-status");
 let uiSessionUrl: string | null = null;
 
-function openBlenderUi(): void {
+async function openBlenderUi(): Promise<void> {
   // index.html explicitly: static servers do not all map a public/ directory to its index.
   const url = new URL("blender-ui/index.html", document.baseURI);
   url.searchParams.set("embed", "1");
   url.searchParams.set("id", "babylon-demo");
   if (uiSessionUrl) URL.revokeObjectURL(uiSessionUrl);
-  const blend = project?.blend;
+  // The session lives in Blender's memory; write it out with any pending edits.
+  uiStatus.textContent = "saving the session for the UI…";
+  uiPanel.hidden = false;
+  const blend = project ? await project.exportBlend().catch(() => null) : null;
   uiSessionUrl = blend ? URL.createObjectURL(new Blob([ownBytes(blend)], { type: "application/x-blender" })) : null;
   if (uiSessionUrl) url.searchParams.set("session", uiSessionUrl);
   $<HTMLButtonElement>("ui-save").disabled = !uiSessionUrl;
@@ -418,7 +421,7 @@ $("adopt").onclick = () => {
   refresh();
   scheduleAutoSync();
 };
-$("ui-open").onclick = openBlenderUi;
+$("ui-open").onclick = () => void openBlenderUi();
 $("ui-close").onclick = closeBlenderUi;
 $("ui-save").onclick = () => {
   uiStatus.textContent = "saving…";
@@ -426,7 +429,10 @@ $("ui-save").onclick = () => {
 };
 $("blender-lights").onchange = () => setStatus("Blender's lights show as markers; editor lights light the scene");
 
-$("dl-blend").onclick = () => project?.blend ? download("scene.blend", ownBytes(project.blend), "application/x-blender") : setStatus("No .blend yet");
+$("dl-blend").onclick = async () => {
+  if (!project) { setStatus("No Blender yet"); return; }
+  download("scene.blend", ownBytes(await project.exportBlend()), "application/x-blender");
+};
 $("dl-glb").onclick = () => void blenderTask("Export .glb", async (p) => {
   const result = await p.sync({ script: 'import bpy\nbpy.ops.export_scene.gltf(filepath="/out/export.glb", export_format="GLB", export_apply=True)' });
   const glb = result.report.files["/out/export.glb"];
@@ -454,14 +460,16 @@ async function boot(): Promise<void> {
     return;
   }
   $("runtime").textContent = `WebAssembly in this tab · build ${manifest.forkRevision}`;
+  const session = createBlenderSession({ server: protocol, onProgress: (text: string) => setStatus(text, "busy") });
   project = new Project({
-    blender: createBlender({ onProgress: (text: string) => setStatus(text, "busy") }),
+    session,
     scene: side,
     protocol,
     plugins: [tracePlugin],
     onLine: (line) => { if (line.trim() && !line.startsWith("<<<")) log(line); },
   });
   await blenderTask("New Blender scene", (p) => p.newScene());
+  log(`[session] Blender booted once in ${(session.bootMs / 1000).toFixed(1)} s; requests reuse it`);
 }
 
 void boot();
