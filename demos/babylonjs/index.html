@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blender ⇄ Babylon</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <canvas id="viewport"></canvas>
+      <div id="drop-hint">Drop a .blend, .glb, .babylon, .obj, .fbx …</div>
+    </main>
+    <aside>
+      <header>
+        <h1>Blender ⇄ Babylon</h1>
+        <label>Blender runs
+          <select id="backend"></select>
+        </label>
+        <p id="status">Starting…</p>
+      </header>
+
+      <section>
+        <h2>Open</h2>
+        <div class="row">
+          <button id="new-blender">New Blender scene</button>
+          <label class="button">Open file…<input id="open" type="file" hidden
+            accept=".blend,.glb,.gltf,.babylon,.obj,.fbx,.stl,.ply,.usdz,.usda,.usdc" /></label>
+        </div>
+        <p class="hint">.blend and .fbx/.ply open in Blender. .glb/.gltf/.obj/.stl open in Blender too; hold Shift to open them in Babylon only. .babylon and USD open in Babylon.</p>
+      </section>
+
+      <section>
+        <h2>Sync</h2>
+        <div class="row">
+          <button id="push">Push transforms → Blender</button>
+          <button id="send">Send Babylon scene → Blender</button>
+        </div>
+        <div class="row">
+          <button id="reload">Reload from Blender</button>
+        </div>
+        <p id="link-state" class="hint"></p>
+      </section>
+
+      <section>
+        <h2>Edit in Babylon</h2>
+        <div class="row" id="gizmo-modes">
+          <button data-mode="position" class="on">Move (W)</button>
+          <button data-mode="rotation">Rotate (E)</button>
+          <button data-mode="scale">Scale (R)</button>
+        </div>
+        <div class="row">
+          <button id="add-box">Add box</button>
+          <button id="add-sphere">Add sphere</button>
+          <button id="delete">Delete</button>
+        </div>
+        <label class="hint"><input id="blender-lights" type="checkbox" /> Light with Blender's lights (physical units: a 1000 W lamp is very bright)</label>
+        <ul id="outliner"></ul>
+      </section>
+
+      <section>
+        <h2>Python in Blender</h2>
+        <textarea id="python" spellcheck="false">import bpy
+bpy.ops.mesh.primitive_monkey_add(location=(0, -3, 1.5))
+monkey = bpy.context.object
+for face in monkey.data.polygons:
+    face.use_smooth = True
+array = monkey.modifiers.new("row", "ARRAY")
+array.count = 3
+array.relative_offset_displace = (1.4, 0, 0)
+mat = bpy.data.materials.new("orange")
+mat.use_nodes = True
+mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.9, 0.35, 0.05, 1)
+monkey.data.materials.append(mat)</textarea>
+        <div class="row"><button id="run-python">Run (Ctrl+Enter)</button></div>
+      </section>
+
+      <section>
+        <h2>Download</h2>
+        <div class="row">
+          <button id="dl-blend">.blend</button>
+          <button id="dl-glb">.glb</button>
+          <button id="dl-babylon">.babylon</button>
+        </div>
+      </section>
+
+      <section class="grow">
+        <h2>Blender output</h2>
+        <pre id="log"></pre>
+      </section>
+    </aside>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

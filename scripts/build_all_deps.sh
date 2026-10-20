@@ -6,12 +6,17 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$ROOT"
 SC="${SC:-$DEPS/logs}"; mkdir -p "$SC"
+# Deps built concurrently within a wave. Each uses NPROC jobs, so the default
+# (the whole wave at once) can mean dozens of compilers; lower it on a laptop.
+DEP_JOBS="${DEP_JOBS:-64}"
 
 wave() {  # wave <name> <script...>
   local name="$1"; shift
   echo "==== wave: $name ===="
   local pids=() s
   for s in "$@"; do
+    # At most DEP_JOBS deps at once (each already runs NPROC compile jobs).
+    while [ "$(jobs -rp | wc -l)" -ge "$DEP_JOBS" ]; do sleep 2; done
     ( bash "scripts/build_$s.sh" >"$SC/$s.log" 2>&1; echo "$?" >"$SC/$s.status" ) &
     pids+=($!)
   done

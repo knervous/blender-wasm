@@ -39,18 +39,22 @@ fi
 # BSD tools. Linux hosts already have them.
 GNU_PATH=""
 if [ "$HOST_OS" = "Darwin" ]; then
-  BREW_PREFIX="${BREW_PREFIX:-$(brew --prefix 2>/dev/null || true)}"
-  if [ -z "$BREW_PREFIX" ]; then
-    for candidate in /opt/homebrew /usr/local; do
-      [ -x "$candidate/bin/brew" ] && BREW_PREFIX="$candidate" && break
+  # A Mac can carry both an Apple-silicon (/opt/homebrew) and an Intel
+  # (/usr/local) Homebrew, with the GNU tools split across them, so look for
+  # each tool in every prefix rather than trusting `brew --prefix`.
+  BREW_PREFIXES=""
+  for candidate in ${BREW_PREFIX:-} /opt/homebrew /usr/local; do
+    case " $BREW_PREFIXES " in *" $candidate "*) ;; *) [ -d "$candidate/bin" ] && BREW_PREFIXES="$BREW_PREFIXES $candidate" ;; esac
+  done
+  for tool in make gnu-sed findutils coreutils gnu-tar; do
+    for prefix in $BREW_PREFIXES; do
+      if [ -d "$prefix/opt/$tool/libexec/gnubin" ]; then
+        GNU_PATH="$GNU_PATH:$prefix/opt/$tool/libexec/gnubin"
+        break
+      fi
     done
-  fi
-  if [ -n "$BREW_PREFIX" ]; then
-    for tool in make gnu-sed findutils coreutils gnu-tar; do
-      [ -d "$BREW_PREFIX/opt/$tool/libexec/gnubin" ] && GNU_PATH="$GNU_PATH:$BREW_PREFIX/opt/$tool/libexec/gnubin"
-    done
-    GNU_PATH="$GNU_PATH:$BREW_PREFIX/bin:$BREW_PREFIX/sbin"
-  fi
+  done
+  for prefix in $BREW_PREFIXES; do GNU_PATH="$GNU_PATH:$prefix/bin:$prefix/sbin"; done
   # A broken Xcode selection leaves /usr/bin/clang++ unusable while the
   # Command Line Tools still work. Fall back to them only when needed.
   if [ -z "${DEVELOPER_DIR:-}" ] && ! xcrun -f clang++ >/dev/null 2>&1 \

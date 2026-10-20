@@ -65,3 +65,6 @@
 *.a
 /scratchpad/
 .DS_Store
+
+# ./build.sh logs
+/build-*.log

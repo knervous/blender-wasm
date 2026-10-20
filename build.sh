@@ -33,7 +33,9 @@
 #                       disk allows, e.g. BLENDER_BUILD=$PWD/build-headless.
 #   BLENDER_URL / BLENDER_REF   which Blender fork + commit to build (cloned
 #                       into blender/; delete it or FORCE=1 to switch)
-#   NPROC               parallel jobs
+#   NPROC               parallel compile jobs per build
+#   DEP_JOBS            dependencies built at once within a wave (default: all;
+#                       DEP_JOBS=2 NPROC=6 keeps a laptop usable)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source scripts/env.sh
@@ -77,9 +79,16 @@ doctor() {
   if command -v clang++ >/dev/null || command -v g++ >/dev/null; then echo "  ok       host C++  (native shader_tool, build-python)"
   else echo "  MISSING  clang++/g++  host C++ compiler"; missing=1; fi
   want brotli ".br artifacts for HTTP serving"
-  if [ "$HOST_OS" = Darwin ]; then
-    for tool in gsed gmake gfind gstat; do need "$tool" "brew install gnu-sed make findutils coreutils"; done
-  fi
+  # The dep builds rely on GNU behaviour (install -D, sed -i, stat -c, find
+  # -printf). On macOS env.sh puts Homebrew's GNU tools first; check that it did.
+  for tool in make sed find install stat; do
+    if "$tool" --version 2>/dev/null | head -1 | grep -q GNU; then
+      printf '  ok       %-10s GNU (%s)\n' "$tool" "$(command -v "$tool")"
+    else
+      printf '  NOT GNU  %-10s %s — brew install make gnu-sed findutils coreutils\n' "$tool" "$(command -v "$tool")"
+      missing=1
+    fi
+  done
   if command -v node >/dev/null; then
     node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=15)?0:1)' \
       || { echo "  OLD      node $(node --version) — need 22.15+"; missing=1; }

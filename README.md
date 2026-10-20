@@ -92,6 +92,14 @@ The protocol is `postMessage` with `blender-embed-*` messages, documented in
 `Cross-Origin-Embedder-Policy: require-corp`, because pthreads need
 `SharedArrayBuffer`.
 
+## Demos
+
+[`demos/babylonjs`](demos/babylonjs) is a Babylon.js editor wired to headless
+Blender in both directions. Edits in Babylon push back onto the `.blend`, and
+`bpy` scripts and Blender imports show up in Babylon. Blender runs either in
+the tab, from the browser runtime, or through the Node runtime behind its dev
+server.
+
 ## Optimising and compressing
 
 The relinks run at `-O1` so iteration stays fast. `./build.sh node|browser`

@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# copied from ../../dist/blender-wasm-browser by `npm run blender`
+public/blender-runtime/

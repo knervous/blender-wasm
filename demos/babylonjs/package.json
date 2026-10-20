@@ -1,0 +1,22 @@
+{
+  "name": "blender-wasm-babylonjs-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Babylon.js editor with headless Blender (WebAssembly) on the other end",
+  "license": "GPL-2.0-or-later",
+  "scripts": {
+    "blender": "node scripts/prepare-blender.mjs browser node",
+    "blender:browser": "node scripts/prepare-blender.mjs browser",
+    "blender:node": "node scripts/prepare-blender.mjs node",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@babylonjs/core": "^9.31.0",
+    "@babylonjs/loaders": "^9.31.0",
+    "@babylonjs/serializers": "^9.31.0",
+    "vite": "^8.3.4"
+  }
+}
