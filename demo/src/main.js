@@ -489,12 +489,21 @@ async function snapshotForParent() {
       } catch (e) { /* Blender may briefly replace the file while saving. */ }
     }, 100);
   });
-  const eventInit = {
-    key: "s", code: "KeyS", keyCode: 83, which: 83,
-    ctrlKey: true, bubbles: true, cancelable: true,
-  };
-  window.dispatchEvent(new KeyboardEvent("keydown", eventInit));
-  window.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+  // Ctrl+S, the way Blender takes it: keys are read on the canvas, routed to
+  // the window under the pointer (so the pointer has to have been seen there),
+  // and Ctrl counts only once its own key event arrives. A bare S starts Scale.
+  const box = canvas.getBoundingClientRect();
+  for (const type of ["pointermove", "mousemove"]) {
+    canvas.dispatchEvent(new MouseEvent(type, {
+      clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true,
+    }));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const key = (type, init) => canvas.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
+  key("keydown", { key: "Control", code: "ControlLeft", keyCode: 17, which: 17, ctrlKey: true });
+  key("keydown", { key: "s", code: "KeyS", keyCode: 83, which: 83, ctrlKey: true });
+  key("keyup", { key: "s", code: "KeyS", keyCode: 83, which: 83, ctrlKey: true });
+  key("keyup", { key: "Control", code: "ControlLeft", keyCode: 17, which: 17, ctrlKey: false });
   await saved;
   const bytes = window.Module.FS.readFile(embed.sessionPath);
   const snapshot = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
