@@ -42,7 +42,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # browser-st is the single-threaded ABI end to end (scripts/env.sh).
-[ "${1:-}" = browser-st ] && export THREADS=0
+for arg in "$@"; do [ "$arg" = browser-st ] && export THREADS=0; done
 source scripts/env.sh
 
 OPTIMIZE="${OPTIMIZE:-1}"

@@ -3,19 +3,17 @@
 # Two-step emscripten cross-build per CPython's Tools/wasm/README.md:
 #   1) a native build-python of the SAME version (freezes stdlib during cross-build)
 #   2) the wasm cross-build: --enable-wasm-pthreads for the pthread ABI; without
-#      it (THREADS=0) CPython's threads are stubs (threading.Thread.start raises)
-#      and patches/python/ makes time.sleep yield through JSPI.
+#      it (THREADS=0) CPython's threads are stubs (threading.Thread.start
+#      raises). time.sleep stays emscripten's busy wait: Blender's server
+#      loop yields through JSPI from C (patches/blender), and a suspension
+#      from Python would cross CPython's JS call trampoline, which JSPI
+#      cannot suspend through ("trying to suspend JS frames").
 set -euo pipefail
 source "$(dirname "$0")/dep_common.sh"
 PYSRC=$(fetch_extract \
   "https://www.python.org/ftp/python/3.13.13/Python-3.13.13.tar.xz" \
   "Python-3.13.13.tar.xz" "Python-3.13.13")
-# patches/python/: changes guarded for the single-threaded build (THREADS=0), so
-# they are inert in the pthread one. -N skips a patch already applied.
-for p in "$ROOT"/patches/python/*.patch; do
-  [ -f "$p" ] || continue
-  patch -d "$PYSRC" -p1 -N -r - --silent < "$p" || log "$(basename "$p"): already applied"
-done
+apply_patches python "$PYSRC"
 
 # 1) Native build-python (host interpreter used by the cross-build).
 NATIVE="$BLD/python-native"
@@ -43,8 +41,8 @@ WB="$BLD/python-wasm"; rm -rf "$WB"; mkdir -p "$WB"
   # wasm. The trampoline routes those calls through JS (wasmTable.get + arity
   # reflection) so the real arity is honored. Not auto-defined by 3.13 configure.
     HOST_TRIPLET="$(sh "$PYSRC/config.guess")"
-    # No JSPI here: CPython's own python.js only aborts if it sleeps, and the
-    # configure tests run their programs; Blender's link adds -sJSPI.
+    # No JSPI here: the configure tests run their programs, and Blender's
+    # link adds -sJSPI.
     PTHREADS_FLAG=--enable-wasm-pthreads; [ "$THREADS" = 0 ] && PTHREADS_FLAG=
     CONFIG_SITE="$PYSRC/Tools/wasm/config.site-wasm32-emscripten" \
     CFLAGS="${ABI_FLAGS/-pthread/} -DPY_CALL_TRAMPOLINE -fPIC" \

@@ -1,3 +1,18 @@
+diff --git a/source/blender/blenkernel/intern/sound.cc b/source/blender/blenkernel/intern/sound.cc
+index 0a867941..c9af0de1 100644
+--- a/source/blender/blenkernel/intern/sound.cc
++++ b/source/blender/blenkernel/intern/sound.cc
+@@ -485,6 +485,10 @@ static void sound_device_use_end()
+  */
+ static bool sound_use_close_thread()
+ {
++#  ifdef BLI_THREADS_INLINE
++  /* No thread can start. */
++  return false;
++#  endif
+   /* No point starting a thread if sound is disabled and we're running headless. */
+   if (g_state.force_device && STREQ(g_state.force_device, "None")) {
+ #  if defined(WITH_PYTHON_MODULE) || defined(WITH_HEADLESS)
 diff --git a/source/blender/blenlib/BLI_threads.hh b/source/blender/blenlib/BLI_threads.hh
 index 0d711a66..47cbef41 100644
 --- a/source/blender/blenlib/BLI_threads.hh

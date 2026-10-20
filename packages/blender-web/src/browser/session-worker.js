@@ -96,7 +96,12 @@ function finish(id) {
   next();
 }
 
+/** Blender's last lines, for a fatal report (output before ready has no request to go to). */
+const recent = [];
+
 function print(text) {
+  recent.push(text);
+  if (recent.length > 40) recent.shift();
   mark("firstLine");
   if (text.includes("<<<BW_PYTHON>>>")) {
     mark("python");
@@ -127,7 +132,15 @@ self.onmessage = ({ data }) => {
   if (data.type !== "boot") return;
   const { runtimeUrl, flavor, wasmModule, dataPackage, server } = data;
   bootStart = performance.now();
-  const fatal = (message) => self.postMessage({ type: "fatal", message: String(message) });
+  // A WebAssembly.Exception (a C++ exception or longjmp leaving main) stringifies
+  // to nothing useful: report its stack, how far the boot got, and the last output.
+  const fatal = (error) => {
+    const detail = error instanceof Error ? error.stack || error.message
+      : typeof WebAssembly.Exception === "function" && error instanceof WebAssembly.Exception ? `WebAssembly.Exception\n${error.stack ?? ""}`
+      : String(error);
+    const reached = Object.keys(marks).join(", ") || "none";
+    self.postMessage({ type: "fatal", message: `${detail}\nboot phases reached: ${reached}\nlast output:\n${recent.slice(-15).join("\n")}` });
+  };
   try {
     importScripts(runtimeUrl + "blender.js");
     mark("glueLoaded");
@@ -158,6 +171,6 @@ self.onmessage = ({ data }) => {
       onAbort: (what) => fatal(`Blender aborted: ${what}`),
     }).catch(fatal);
   } catch (error) {
-    fatal(error && error.stack || error);
+    fatal(error);
   }
 };

@@ -38,8 +38,8 @@ version (6.0.1), and any `EMSDK` already in your shell is ignored.
 ## Outputs
 
 ```
-dist/blender-wasm-browser/    @knervous/blender-web: blender.js, blender.{wasm,data}.br,
-                              manifest.json, LICENSE, README.md (+ an npm pack .tgz in dist/)
+dist/blender-wasm-browser/    pthread runtime: blender.js, blender.{wasm,data}.br, manifest.json, LICENSE
+dist/blender-wasm-browser-st/ single-threaded (JSPI) runtime, same files
 dist/blender-wasm-node/       the Node runtime: blender.js, blender.{wasm,data}.zst, manifest.json, LICENSE
 dist/blender-web-<rev>.tar.gz the demo site (serve dist/ cross-origin isolated)
 ```
@@ -48,29 +48,28 @@ dist/blender-web-<rev>.tar.gz the demo site (serve dist/ cross-origin isolated)
 plus the fork revision, Blender commit, emsdk version and wasm-opt level the
 runtime was built from.
 
-## npm packages
+## npm package
 
-Two packages, the way ffmpeg.wasm splits `@ffmpeg/ffmpeg` from its core:
-
-- [`@knervous/blender-web`](packages/blender-web): the API (about 80 kB). It
-  has the project model, the browser session, engine adapters for Babylon.js
-  (`/babylon`) and three.js (`/three`), a Vite plugin (`/vite`), a
-  `blender-web install <dir>` CLI and a Node session (`/node`).
-- `@knervous/blender-web`: the binaries (`./build.sh browser`, 33 MB
-  packed). It is a peer dependency of the API, so npm installs it alongside,
-  and API releases don't republish it.
+[`@knervous/blender-web`](packages/blender-web) is the runtime and the core:
+both browser builds (`./build.sh browser`, pthreads, for cross-origin
+isolated pages; `./build.sh browser-st`, single-threaded with JSPI, for any
+page), the project model, adapters for Babylon.js (`/babylon`), Babylon Lite
+(`/lite`) and three.js (`/three`), a Vite plugin (`/vite`), a
+`blender-web install <dir>` CLI and a Node session (`/node`). `npm run build`
+there takes the runtimes from `dist/`.
 
 ```js
 // vite.config.js
 import { blenderWeb } from "@knervous/blender-web/vite";
-export default { plugins: [blenderWeb()] }; // COOP/COEP, runtime served and emitted
+export default { plugins: [blenderWeb()] }; // headers, runtime served and emitted
 
 // app
+import * as THREE from "three";
 import { Project } from "@knervous/blender-web";
 import { createBlenderSession } from "@knervous/blender-web/browser";
-import { ThreeSide } from "@knervous/blender-web/three"; // or BabylonSide from /babylon
+import { ThreeSide } from "@knervous/blender-web/three"; // or BabylonSide / LiteSide
 
-const project = new Project({ session: createBlenderSession(), scene: new ThreeSide(scene) });
+const project = new Project({ session: createBlenderSession(), scene: new ThreeSide(THREE, scene) });
 await project.newScene();
 ```
 
@@ -94,8 +93,8 @@ The protocol is `postMessage` with `blender-embed-*` messages, documented in
 
 ## Demos
 
-[`demos/editor`](demos/editor) is a Babylon.js or three.js editor
-(`?engine=three`) wired to headless Blender in both directions. Edits in the
+[`demos/editor`](demos/editor) is an example editor on Babylon.js, Babylon
+Lite (`?engine=lite`) or three.js (`?engine=three`) wired to headless Blender in both directions. Edits in the
 engine push back onto the `.blend`, and `bpy` scripts and Blender imports show
 up in the engine. Blender runs in the tab: it uses the pthread browser runtime
 and assumes cross-origin isolation.

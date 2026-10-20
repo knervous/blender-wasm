@@ -95,9 +95,11 @@ log "scripts=$(du -shL "$STAGE/$BLENDER_VERSION_DIR/scripts"|cut -f1) datafiles=
 # Threads: the pthread build runs main() on a pthread (PROXY_TO_PTHREAD, above).
 # The single-threaded build runs main() on the worker's own thread and gives
 # the thread back with JSPI: Blender's poll loop (BLENDER_WASM_POLL, see
-# patches/blender) and time.sleep suspend to the event loop. JSPI cannot
+# patches/blender) suspends to the event loop between requests. JSPI cannot
 # suspend through JS frames, which is why that build's ABI uses wasm
-# exceptions and setjmp/longjmp (no invoke_* trampolines).
+# exceptions and setjmp/longjmp (no invoke_* trampolines), and why only C
+# suspends: CPython calls builtins through a JS trampoline where wasm type
+# reflection is missing, so a Python-level suspension would trap.
 if [ "$THREADS" = 0 ]; then
   THREAD_FLAGS="$ABI_FLAGS -sJSPI"
 else
@@ -105,7 +107,11 @@ else
   -sPTHREAD_POOL_SIZE=4 -sPTHREAD_POOL_SIZE_STRICT=0"
 fi
 
-FLAGS="$THREAD_FLAGS \
+# LINK_NAMES=1 keeps function names (--profiling-funcs), so a trap's stack
+# reads as Blender's functions rather than wasm-function[N].
+NAME_FLAGS=""; [ "${LINK_NAMES:-0}" = 1 ] && NAME_FLAGS="--profiling-funcs"
+
+FLAGS="$THREAD_FLAGS $NAME_FLAGS \
   -Wl,--allow-multiple-definition \
   -sEXIT_RUNTIME=0 \
   $LINK_OPT \

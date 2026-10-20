@@ -6,6 +6,8 @@ source "$(dirname "$0")/dep_common.sh"
 src=$(fetch_extract \
   "https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/refs/tags/v3.1.13.1.tar.gz" \
   "OpenImageIO-v3.1.13.1.tar.gz" "OpenImageIO-3.1.13.1")
+# patches/oiio/: guarded for the single-threaded build (THREADS=0).
+apply_patches oiio "$src"
 
 # OIIO's platform detection keys on __linux__, which emscripten does not define
 # (it defines __EMSCRIPTEN__). Emscripten's libc is musl-like and provides the

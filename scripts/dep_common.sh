@@ -49,6 +49,18 @@ fetch_extract() {
   echo "$SRC/$dir"
 }
 
+# apply_patches <name> <srcdir>
+# Applies patches/<name>/*.patch to a dependency's source. They are guarded
+# for the build they serve (e.g. emscripten without pthreads), so they apply
+# in every flavour; -N skips one already applied.
+apply_patches() {
+  local name="$1" srcdir="$2" p
+  for p in "$ROOT/patches/$name"/*.patch; do
+    [ -f "$p" ] || continue
+    patch -d "$srcdir" -p1 -N -r - --silent < "$p" || log "$(basename "$p"): already applied"
+  done
+}
+
 # em_cmake <srcdir> <builddir-name> [extra cmake -D args...]
 # Configures + builds + installs a CMake project into $SYSROOT.
 em_cmake() {

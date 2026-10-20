@@ -51,6 +51,22 @@ for (const [flavor, source] of Object.entries(SOURCES)) {
   const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"));
   console.log(`runtime ${flavor}: ${manifest.forkRevision} from ${source}`);
 }
+// runtime/ is a servable layout as it is (a CDN serves it from the package):
+// the workers, and a root manifest naming the flavours and how their binaries
+// are encoded (the page decodes them itself when no server does).
+const flavors = {};
+for (const flavor of Object.keys(SOURCES)) {
+  const path = join(root, "runtime", flavor, "manifest.json");
+  if (existsSync(path)) flavors[flavor] = JSON.parse(readFileSync(path, "utf8"));
+}
+if (Object.keys(flavors).length) {
+  for (const name of ["session-worker.js", "run-worker.js"]) copyFileSync(join(root, "src/browser", name), join(root, "runtime", name));
+  writeFileSync(join(root, "runtime/manifest.json"), JSON.stringify({
+    forkRevision: Object.values(flavors)[0].forkRevision,
+    encoding: "br",
+    flavors,
+  }, null, 2));
+}
 if (missing.length) {
   if (process.argv.includes("--require-runtime")) {
     console.error(`missing runtime flavours: ${missing.join(", ")}; run ./build.sh browser and ./build.sh browser-st`);

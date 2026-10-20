@@ -208,14 +208,21 @@ exposes `read_entity`, `write_transform`, `log` and the axis matrices.
 
 ## Writing a scene side
 
-`/babylon` (`BabylonSide`) and `/three` (`ThreeSide`) are scene sides for
-those engines, with the editing surface an editor needs (`EngineSide<N>`:
-primitives, adopt, remove, material assignment and properties). Babylon's
-nodes live under a root that turns Y 180° and mirrors Z, the root its glTF
-loader builds, so values cross unchanged and loaded glTF keeps its place.
-three.js is already glTF's space, so its root is an identity group. Meshes
-cross as unindexed triangles grouped by material slot; Blender welds them
-back into a connected mesh.
+`/babylon` (`BabylonSide`), `/lite` (`LiteSide`) and `/three` (`ThreeSide`)
+are scene sides for those engines (`EngineSide<N, M>`), and the core only:
+they read the scene as the engine holds it (slots and material properties
+from the engine's own materials; a disposed or detached node drops out, which
+syncs as a delete) and write Blender's changes back, plus `track()` and
+lookups. Each takes the engine from the app and imports only its types.
+
+Babylon's and Lite's nodes live under a root that mirrors X, the root their
+glTF loaders build, so values cross unchanged and loaded glTF keeps its
+place; engine-native content is conjugated by that mirror when tracked, so
+Blender gets an unmirrored object. three.js is already glTF's space, so its
+root is an identity group. Lite meshes have one material each, so a Lite mesh
+entity is a node with a mesh per material slot. Meshes cross as unindexed
+triangles grouped by material slot; Blender welds them back into a connected
+mesh.
 
 For another engine, implement `SceneSide`:
 

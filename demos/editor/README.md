@@ -1,24 +1,25 @@
-# Blender editor (Babylon.js or three.js)
+# Blender editor (Babylon.js, Babylon Lite or three.js)
 
 A small editor with Blender running in the same tab, compiled to
 WebAssembly, on [`@knervous/blender-web`](../../packages/blender-web).
-`?engine=three` uses three.js; Babylon.js is the default. Open a `.blend` (or
+`?engine=lite` uses Babylon Lite (WebGPU, no gizmos), `?engine=three` three.js; Babylon.js is the default. `?threads=0` forces the single-threaded build, `?threads=1` the pthread one. Open a `.blend` (or
 anything Blender imports) and edit it in the engine. Moves, deletions, new
 objects, material assignment and material colour, metallic and roughness all
 sync back onto the Blender objects. You can also run `bpy` against the scene,
 adopt engine content into the project, or edit in Blender's own UI.
 
 ```bash
-../../build.sh browser   # once: the runtime package, ../../dist/blender-wasm-browser
+../../build.sh browser     # once: the pthread runtime (../../dist/blender-wasm-browser)
+../../build.sh browser-st  # and/or the single-threaded one
 npm install
-npm run dev              # http://localhost:5321  (?engine=three)
+npm run dev              # http://localhost:5321  (?engine=lite|three, ?threads=0|1)
 ```
 
-Both engines, both packages and Vite are dev dependencies. The packages are
-linked from this repository: `@knervous/blender-web` from
-`../../packages/blender-web` (built by `predev`), and the runtime from
-`../../dist/blender-wasm-browser`. A first `./build.sh browser` compiles
-Blender from source, which takes hours (see the top-level README).
+The three engines, the package and Vite are dev dependencies. The package
+is linked from this repository (`../../packages/blender-web`, built by
+`predev`), and its build takes the runtimes from `../../dist/`. A first
+`./build.sh browser` compiles Blender from source, which takes hours (see the
+top-level README).
 `npm run blender:ui` links the full Blender UI (`../../build.sh web`) for
 "Open in Blender UI".
 
@@ -32,10 +33,12 @@ project protocol running as a server. It stays alive for the page, keeping
 the scene in memory, so a sync takes milliseconds plus its work. Nothing runs
 on a server.
 
-The editor UI (`src/main.ts`) is the same for both engines. Each engine has a
-viewport (`src/viewport-babylon.ts`, `src/viewport-three.ts`): camera, gizmos,
+The editor UI (`src/main.ts`) is the same for every engine. Each engine has a
+viewport (`src/viewport-babylon.ts`, `src/viewport-lite.ts`, `src/viewport-three.ts`): camera, gizmos,
 picking and engine-only file loading around the package's adapter
-(`BabylonSide`, `ThreeSide`). Only the chosen engine is loaded.
+(`BabylonSide`, `LiteSide`, `ThreeSide`), on the engine's own API: the
+package is the core adapter, and these editing tools are the app's. Only the
+chosen engine is loaded.
 
 ## How the two sides stay in step
 
