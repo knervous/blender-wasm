@@ -55,11 +55,22 @@ if [ "$HOST_OS" = "Darwin" ]; then
     done
   done
   for prefix in $BREW_PREFIXES; do GNU_PATH="$GNU_PATH:$prefix/bin:$prefix/sbin"; done
-  # A broken Xcode selection leaves /usr/bin/clang++ unusable while the
-  # Command Line Tools still work. Fall back to them only when needed.
-  if [ -z "${DEVELOPER_DIR:-}" ] && ! xcrun -f clang++ >/dev/null 2>&1 \
-      && [ -d /Library/Developer/CommandLineTools ]; then
-    export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+  # The host compiler is needed for native tools (CPython's build-python,
+  # shader_tool). A broken or mismatched Xcode selection can leave it unable to
+  # link even though `xcrun` finds it (e.g. Xcode's linker against a newer
+  # Command Line Tools SDK), so prove it by building a trivial program and fall
+  # back to the Command Line Tools when that fails. Probed once per build: the
+  # outcome is exported to child scripts.
+  if [ -z "${DEVELOPER_DIR:-}" ] && [ -z "${BLENDER_WASM_CC_PROBED:-}" ]; then
+    export BLENDER_WASM_CC_PROBED=1
+    probe_dir="$(mktemp -d)"
+    printf 'int main(void) { return 0; }\n' > "$probe_dir/probe.c"
+    if ! cc "$probe_dir/probe.c" -o "$probe_dir/probe" >/dev/null 2>&1 \
+        && [ -d /Library/Developer/CommandLineTools ] \
+        && DEVELOPER_DIR=/Library/Developer/CommandLineTools cc "$probe_dir/probe.c" -o "$probe_dir/probe" >/dev/null 2>&1; then
+      export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+    fi
+    rm -rf "$probe_dir"
   fi
 fi
 

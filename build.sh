@@ -76,8 +76,14 @@ doctor() {
   need node "Node 22.15+ (emscripten, the API, the demo build)"
   need npm "demo build"
   need zstd "artifact compression"
-  if command -v clang++ >/dev/null || command -v g++ >/dev/null; then echo "  ok       host C++  (native shader_tool, build-python)"
-  else echo "  MISSING  clang++/g++  host C++ compiler"; missing=1; fi
+  local probe; probe="$(mktemp -d)"
+  printf 'int main(void) { return 0; }\n' > "$probe/p.c"
+  if cc "$probe/p.c" -o "$probe/p" 2>/dev/null; then
+    echo "  ok       host cc    links${DEVELOPER_DIR:+ (DEVELOPER_DIR=$DEVELOPER_DIR)}"
+  else
+    echo "  BROKEN   host cc    cannot link a trivial program (native build-python, shader_tool)"; missing=1
+  fi
+  rm -rf "$probe"
   want brotli ".br artifacts for HTTP serving"
   # The dep builds rely on GNU behaviour (install -D, sed -i, stat -c, find
   # -printf). On macOS env.sh puts Homebrew's GNU tools first; check that it did.
