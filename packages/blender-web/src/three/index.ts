@@ -354,13 +354,15 @@ export class ThreeSide implements EngineSide<Object3D, Material> {
   private replaceGeometry(id: string, mesh: MeshData): void {
     const node = this.node(id);
     if (!node) return;
-    if (node instanceof this.api.Mesh) {
+    // A skinned mesh cannot take Blender's evaluated vertices (they carry no
+    // skin weights; its shader would collapse them): it is swapped below too.
+    if (node instanceof this.api.Mesh && !("isSkinnedMesh" in node && node.isSkinnedMesh)) {
       node.geometry.dispose();
       node.geometry = buildGeometry(this.api, mesh);
       this.assignSlots(node, dataOf(node).bwMaterials ?? []);
       return;
     }
-    // An empty that became a mesh: swap the node, keep children and fields.
+    // An empty that became a mesh, or a skinned mesh: swap the node, keep children and fields.
     const replacement = new this.api.Mesh(buildGeometry(this.api, mesh), this.emptySlot);
     replacement.name = node.name;
     replacement.userData = node.userData;

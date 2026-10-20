@@ -502,6 +502,15 @@ function applyMesh(api: BabylonApi, node: Mesh, mesh: MeshData): void {
     data.uvs = uvs;
   }
   data.indices = Uint32Array.from({ length: mesh.vertexCount }, (_, i) => i);
+  // Blender's evaluated mesh replaces the vertices, so per-vertex data it does
+  // not send (skin weights, tangents, colours, extra UVs) no longer lines up;
+  // stale skin buffers make the GPU skin garbage. Drop it, and the skeleton and
+  // morph targets bound to the old vertices.
+  const sent = new Set<string>([api.VertexBuffer.PositionKind, api.VertexBuffer.NormalKind]);
+  if (data.uvs) sent.add(api.VertexBuffer.UVKind);
+  for (const kind of node.getVerticesDataKinds()) if (!sent.has(kind)) node.removeVerticesData(kind);
+  node.skeleton = null;
+  node.morphTargetManager = null;
   data.applyToMesh(node, true);
   // What Babylon's own glTF loader sets for glTF's counter-clockwise data under
   // the mirrored root in a left-handed scene (Babylon 9 orients per mesh).
