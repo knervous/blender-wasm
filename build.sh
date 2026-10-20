@@ -155,9 +155,12 @@ compile() {
   # scripts supply what it lacks (memory settings, stubs, WasmFS backends). So
   # build everything and accept a failure only when that link is all that is left.
   if ! ninja -C "$BLENDER_BUILD" -j"$NPROC" blender; then
+    # Blender's buildinfo.h is a deliberately always-stale output, so ninja
+    # lists it (and buildinfo.c.o) before the link every time.
     local left
     left=$(ninja -C "$BLENDER_BUILD" -n blender | grep -E '^\[[0-9]+/[0-9]+\]' || true)
-    if [ "$(printf '%s\n' "$left" | grep -c .)" = 1 ] && printf '%s' "$left" | grep -q 'bin/blender.js'; then
+    if printf '%s' "$left" | grep -q 'bin/blender.js' \
+        && ! printf '%s\n' "$left" | grep -vE 'buildinfo|bin/blender\.js' | grep -q .; then
       log "objects and libraries complete; CMake's standalone link is skipped by design"
     else
       die "compile failed before the final link"
