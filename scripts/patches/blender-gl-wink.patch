@@ -1,0 +1,724 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index add11760..778128d0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -958,6 +958,11 @@ else()
+   set(WITH_WEBGPU_BACKEND OFF)
+ endif()
+ mark_as_advanced(WITH_WEBGPU_BACKEND)
++if(WITH_WEBGPU_BACKEND)
++  # Global: the web-port workarounds outside source/blender/gpu (CPU pick
++  # fallbacks, synchronous jobs, ...) are only needed by the WebGPU backend.
++  add_compile_definitions(WITH_WEBGPU_BACKEND)
++endif()
+ 
+ # Metal
+ if(APPLE)
+diff --git a/intern/ghost/CMakeLists.txt b/intern/ghost/CMakeLists.txt
+index 00f6ec1a..d5e8a32b 100644
+--- a/intern/ghost/CMakeLists.txt
++++ b/intern/ghost/CMakeLists.txt
+@@ -142,7 +142,20 @@ elseif(WITH_GHOST_WEB)
+     intern/GHOST_SystemWeb.hh
+     intern/GHOST_WindowWeb.hh
+   )
++  if(WITH_OPENGL_BACKEND)
++    list(APPEND SRC
++      intern/GHOST_ContextWink.cc
++
++      intern/GHOST_ContextWink.hh
++    )
++    list(APPEND INC_SYS
++      ${WINK_INCLUDE_DIR}
++    )
++  endif()
+   add_definitions(-DWITH_GHOST_WEB)
++  if(WITH_WEBGPU_BACKEND)
++    add_definitions(-DWITH_WEBGPU_BACKEND)
++  endif()
+ elseif(WITH_GHOST_SDL)
+   list(APPEND SRC
+     intern/GHOST_ContextSDL.cc
+@@ -478,7 +491,7 @@ elseif(WIN32)
+   endif()
+ endif()
+ 
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+   if(WITH_OPENGL_BACKEND)
+     list(APPEND SRC
+       intern/GHOST_ContextEGL.cc
+diff --git a/intern/ghost/intern/GHOST_ContextWink.cc b/intern/ghost/intern/GHOST_ContextWink.cc
+new file mode 100644
+index 00000000..2d997395
+--- /dev/null
++++ b/intern/ghost/intern/GHOST_ContextWink.cc
+@@ -0,0 +1,213 @@
++/* SPDX-FileCopyrightText: 2026 Blender Authors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later */
++
++/** \file
++ * \ingroup GHOST
++ */
++
++#include "GHOST_ContextWink.hh"
++
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++
++#include <wink.h>
++
++/* All contexts share objects through this hidden root, which is never
++ * destroyed: Blender may free its first context (e.g. the initial window's)
++ * while others still live. */
++static wink_context *s_share_root = nullptr;
++static int s_init_status = WINK_ERROR_NOT_INITIALIZED;
++
++static bool wink_ensure_init()
++{
++  static std::once_flag once;
++  std::call_once(once, [] {
++    wink_init_attribs ia;
++    wink_init_attribs_default(&ia);
++    ia.flags = WINK_INIT_GL_ON_MAIN_THREAD;
++    s_init_status = wink_init(&ia);
++    if (s_init_status != WINK_OK) {
++      fprintf(stderr, "GHOST_ContextWink: wink_init failed: %s\n", wink_status_string(s_init_status));
++      return;
++    }
++    int core = 0, compat = 0, es = 0;
++    wink_query_versions(&core, &compat, &es);
++    fprintf(stderr,
++            "GHOST_ContextWink: wink ready (GL core %d.%d, compat %d.%d, ES %d.%d)\n",
++            core / 10,
++            core % 10,
++            compat / 10,
++            compat % 10,
++            es / 10,
++            es % 10);
++
++    wink_context_attribs ca;
++    wink_context_attribs_default(&ca);
++    ca.api = WINK_API_OPENGL_CORE;
++    ca.major = 0; /* Highest available; Blender requires >= 4.3. */
++    ca.minor = 0;
++    int status = WINK_OK;
++    s_share_root = wink_context_create(&ca, &status);
++    if (s_share_root == nullptr) {
++      fprintf(stderr,
++              "GHOST_ContextWink: root context creation failed: %s\n",
++              wink_status_string(status));
++      s_init_status = status;
++    }
++  });
++  return s_init_status == WINK_OK;
++}
++
++GHOST_ContextWink::GHOST_ContextWink(const GHOST_ContextParams &context_params,
++                                     const char *canvas_selector,
++                                     int32_t width,
++                                     int32_t height)
++    : GHOST_Context(context_params),
++      canvas_selector_(canvas_selector),
++      width_(width),
++      height_(height)
++{
++}
++
++GHOST_ContextWink::~GHOST_ContextWink()
++{
++  releaseNativeHandles();
++}
++
++GHOST_TSuccess GHOST_ContextWink::initializeDrawingContext()
++{
++  if (!wink_ensure_init()) {
++    return GHOST_kFailure;
++  }
++
++  if (canvas_selector_) {
++    wink_surface_attribs sa;
++    wink_surface_attribs_default(&sa);
++    sa.canvas = canvas_selector_;
++    sa.width = width_ > 0 ? width_ : 1;
++    sa.height = height_ > 0 ? height_ : 1;
++    /* Blender renders everything into offscreen framebuffers and only blits
++     * into the window's back buffer: no depth/stencil needed there. */
++    sa.alpha_bits = 8;
++    sa.depth_bits = 0;
++    sa.stencil_bits = 0;
++    sa.opaque = 1;
++    sa.manage_canvas_size = 1;
++    int status = WINK_OK;
++    surface_ = wink_surface_create(&sa, &status);
++    if (surface_ == nullptr) {
++      fprintf(stderr,
++              "GHOST_ContextWink: surface creation failed: %s\n",
++              wink_status_string(status));
++      return GHOST_kFailure;
++    }
++  }
++
++  wink_context_attribs ca;
++  wink_context_attribs_default(&ca);
++  ca.api = WINK_API_OPENGL_CORE;
++  ca.major = 0;
++  ca.minor = 0;
++  ca.share = s_share_root;
++  if (context_params_.is_debug) {
++    ca.flags |= WINK_CONTEXT_DEBUG;
++  }
++  int status = WINK_OK;
++  context_ = wink_context_create(&ca, &status);
++  if (context_ == nullptr) {
++    fprintf(
++        stderr, "GHOST_ContextWink: context creation failed: %s\n", wink_status_string(status));
++    releaseNativeHandles();
++    return GHOST_kFailure;
++  }
++
++  activateDrawingContext();
++  return GHOST_kSuccess;
++}
++
++GHOST_TSuccess GHOST_ContextWink::releaseNativeHandles()
++{
++  if (context_ != nullptr) {
++    if (wink_get_current_context() == context_) {
++      wink_make_current(nullptr, nullptr, nullptr);
++    }
++    wink_context_destroy(context_);
++    context_ = nullptr;
++  }
++  if (surface_ != nullptr) {
++    wink_surface_destroy(surface_);
++    surface_ = nullptr;
++  }
++  if (active_context_ == this) {
++    active_context_ = nullptr;
++  }
++  return GHOST_kSuccess;
++}
++
++GHOST_TSuccess GHOST_ContextWink::activateDrawingContext()
++{
++  if (context_ == nullptr) {
++    return GHOST_kFailure;
++  }
++  active_context_ = this;
++  if (wink_get_current_context() == context_ && wink_get_current_surface() == surface_) {
++    return GHOST_kSuccess;
++  }
++  return wink_make_current(context_, surface_, surface_) == WINK_OK ? GHOST_kSuccess :
++                                                                      GHOST_kFailure;
++}
++
++GHOST_TSuccess GHOST_ContextWink::releaseDrawingContext()
++{
++  if (active_context_ == this) {
++    active_context_ = nullptr;
++  }
++  if (context_ != nullptr && wink_get_current_context() == context_) {
++    return wink_make_current(nullptr, nullptr, nullptr) == WINK_OK ? GHOST_kSuccess :
++                                                                     GHOST_kFailure;
++  }
++  return GHOST_kSuccess;
++}
++
++GHOST_TSuccess GHOST_ContextWink::swapBufferRelease()
++{
++  if (surface_ == nullptr) {
++    return GHOST_kFailure;
++  }
++  const bool ok = wink_swap_buffers(surface_) == WINK_OK;
++  if (ok && ++swap_count_ == 2) {
++    /* The page swaps its splash for the canvas on this line (demo/src/main.js);
++     * the first swap is usually the startup clear. */
++    fprintf(stderr, "WINK_FIRST_FRAME %dx%d\n", width_, height_);
++  }
++  return ok ? GHOST_kSuccess : GHOST_kFailure;
++}
++
++GHOST_TSuccess GHOST_ContextWink::setSwapInterval(int interval)
++{
++  if (surface_ == nullptr) {
++    return GHOST_kFailure;
++  }
++  swap_interval_ = interval;
++  return wink_swap_interval(surface_, interval) == WINK_OK ? GHOST_kSuccess : GHOST_kFailure;
++}
++
++GHOST_TSuccess GHOST_ContextWink::getSwapInterval(int &interval_out)
++{
++  interval_out = swap_interval_;
++  return GHOST_kSuccess;
++}
++
++void GHOST_ContextWink::resize(int32_t width, int32_t height)
++{
++  if (width <= 0 || height <= 0 || (width == width_ && height == height_)) {
++    return;
++  }
++  width_ = width;
++  height_ = height;
++  if (surface_ != nullptr) {
++    wink_surface_resize(surface_, width, height);
++  }
++}
+diff --git a/intern/ghost/intern/GHOST_ContextWink.hh b/intern/ghost/intern/GHOST_ContextWink.hh
+new file mode 100644
+index 00000000..711d4a04
+--- /dev/null
++++ b/intern/ghost/intern/GHOST_ContextWink.hh
+@@ -0,0 +1,62 @@
++/* SPDX-FileCopyrightText: 2026 Blender Authors
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later */
++
++/** \file
++ * \ingroup GHOST
++ * OpenGL context on wink (Mesa's GL on the gex_wgpu WebGPU driver, linked
++ * statically into the wasm module). wink is initialized in its
++ * "GL on the main thread" mode: the WebGPU device, the canvas and the whole
++ * driver live on the browser main thread, and any Blender pthread may make a
++ * context current and call GL; calls are marshalled through Mesa's glthread
++ * and calls that need an answer block the calling worker until main replies.
++ * No JSPI is involved on Blender's side.
++ *
++ * Every context shares objects with the first one created, as GL contexts in
++ * Blender always do (window, offscreen, render and shader-compile contexts).
++ */
++
++#pragma once
++
++#include "GHOST_Context.hh"
++
++#include <cstdint>
++
++struct wink_context;
++struct wink_surface;
++
++class GHOST_ContextWink : public GHOST_Context {
++ public:
++  /**
++   * \param canvas_selector: CSS selector of the canvas to present into, or
++   * nullptr for an offscreen context (no default framebuffer).
++   */
++  GHOST_ContextWink(const GHOST_ContextParams &context_params,
++                    const char *canvas_selector,
++                    int32_t width,
++                    int32_t height);
++  ~GHOST_ContextWink() override;
++
++  GHOST_TSuccess swapBufferAcquire() override
++  {
++    return GHOST_kSuccess;
++  }
++  GHOST_TSuccess swapBufferRelease() override;
++  GHOST_TSuccess activateDrawingContext() override;
++  GHOST_TSuccess releaseDrawingContext() override;
++  GHOST_TSuccess initializeDrawingContext() override;
++  GHOST_TSuccess releaseNativeHandles() override;
++  GHOST_TSuccess setSwapInterval(int interval) override;
++  GHOST_TSuccess getSwapInterval(int &interval_out) override;
++
++  /** Resize the default framebuffer (and the canvas backing store). */
++  void resize(int32_t width, int32_t height);
++
++ private:
++  const char *canvas_selector_;
++  int32_t width_, height_;
++  int swap_interval_ = 1;
++  int swap_count_ = 0;
++  wink_surface *surface_ = nullptr;
++  wink_context *context_ = nullptr;
++};
+diff --git a/intern/ghost/intern/GHOST_SystemWeb.cc b/intern/ghost/intern/GHOST_SystemWeb.cc
+index 52023a5c..4d8bf489 100644
+--- a/intern/ghost/intern/GHOST_SystemWeb.cc
++++ b/intern/ghost/intern/GHOST_SystemWeb.cc
+@@ -6,6 +6,7 @@
+  * \ingroup GHOST
+  */
+ 
++#include <cstdio>
+ #include <cstring>
+ 
+ #include <emscripten/emscripten.h>
+@@ -179,6 +180,14 @@ GHOST_IWindow *GHOST_SystemWeb::createWindow(const char *title,
+   }
+   const GHOST_ContextParams context_params = GHOST_CONTEXT_PARAMS_FROM_GPU_SETTINGS(gpu_settings);
+   window_ = new GHOST_WindowWeb(title, canvas_w_, canvas_h_, state, context_params);
++  if (gpu_settings.context_type != GHOST_kDrawingContextTypeNone &&
++      window_->setDrawingContextType(gpu_settings.context_type) == GHOST_kFailure)
++  {
++    fprintf(stderr, "GHOST_SystemWeb: could not create a drawing context for the canvas\n");
++    delete window_;
++    window_ = nullptr;
++    return nullptr;
++  }
+   /* Register with the window manager so validWindow() passes — otherwise every
+    * GHOST event is dropped as "invalid window" in wm_window's event handler. */
+   window_manager_->addWindow(window_);
+diff --git a/intern/ghost/intern/GHOST_SystemWeb.hh b/intern/ghost/intern/GHOST_SystemWeb.hh
+index 87c180c8..d446282e 100644
+--- a/intern/ghost/intern/GHOST_SystemWeb.hh
++++ b/intern/ghost/intern/GHOST_SystemWeb.hh
+@@ -89,13 +89,26 @@ class GHOST_SystemWeb : public GHOST_System {
+ 
+   GHOST_IContext *createOffscreenContext(GHOST_GPUSettings gpu_settings) override
+   {
++    GHOST_ContextParams params = {};
++    params.is_stereo_visual = bool(gpu_settings.flags & GHOST_gpuStereoVisual);
++    params.is_debug = bool(gpu_settings.flags & GHOST_gpuDebugContext);
++#ifdef WITH_OPENGL_BACKEND
++    if (gpu_settings.context_type == GHOST_kDrawingContextTypeOpenGL) {
++      /* Offscreen GL context on wink (no default framebuffer), sharing objects
++       * with every other context. Any pthread may make it current. */
++      GHOST_Context *context = new GHOST_ContextWink(params, nullptr, 0, 0);
++      if (context->initializeDrawingContext()) {
++        return context;
++      }
++      delete context;
++      return nullptr;
++    }
++#endif
+     /* The WebGPU backend acquires its device independently of GHOST, and there
+      * is exactly one device: hand back a no-op context so secondary-context
+      * creation (IMB_ensure_gpu_context via F12 render) has a non-null object
+      * to activate/release instead of CRASHING on a null virtual call. The
+      * resulting GPUContext shares the global WebGPU device. */
+-    GHOST_ContextParams params = {};
+-    params.is_stereo_visual = bool(gpu_settings.flags & GHOST_gpuStereoVisual);
+     return new GHOST_ContextNone(params);
+   }
+   GHOST_TSuccess disposeContext(GHOST_IContext *context) override
+diff --git a/intern/ghost/intern/GHOST_WindowWeb.hh b/intern/ghost/intern/GHOST_WindowWeb.hh
+index 4e91c635..0205252a 100644
+--- a/intern/ghost/intern/GHOST_WindowWeb.hh
++++ b/intern/ghost/intern/GHOST_WindowWeb.hh
+@@ -17,10 +17,16 @@
+ 
+ #include <emscripten/emscripten.h>
+ 
++#ifdef WITH_OPENGL_BACKEND
++#  include "GHOST_ContextWink.hh"
++#endif
++
++#ifdef WITH_WEBGPU_BACKEND
+ /* Implemented by the WebGPU GPU backend (source/blender/gpu/webgpu). Resolved
+  * at the final static link of the Blender executable. */
+ extern "C" void blender_webgpu_present(int width, int height);
+ extern "C" void blender_webgpu_backbuffer_size(int width, int height);
++#endif
+ 
+ class GHOST_WindowWeb : public GHOST_Window {
+  private:
+@@ -43,6 +49,9 @@ class GHOST_WindowWeb : public GHOST_Window {
+     height_ = height;
+   }
+ 
++  /** The canvas this window presents into. */
++  static constexpr const char *canvas_selector = "#canvas";
++
+   GHOST_TSuccess swapBufferAcquire() override
+   {
+     return GHOST_kSuccess;
+@@ -139,19 +148,47 @@ class GHOST_WindowWeb : public GHOST_Window {
+   }
+   GHOST_TSuccess swapBufferRelease() override
+   {
++#ifdef WITH_OPENGL_BACKEND
++    if (getDrawingContextType() == GHOST_kDrawingContextTypeOpenGL) {
++      return GHOST_Window::swapBufferRelease();
++    }
++#endif
++#ifdef WITH_WEBGPU_BACKEND
+     /* End of window frame: blit the backbuffer into the canvas surface. */
+     blender_webgpu_present(int(width_), int(height_));
++#endif
+     return GHOST_kSuccess;
+   }
+-  GHOST_Context *newDrawingContext(GHOST_TDrawingContextType /*type*/) override
+-  {
++  GHOST_Context *newDrawingContext(GHOST_TDrawingContextType type) override
++  {
++#ifdef WITH_OPENGL_BACKEND
++    if (type == GHOST_kDrawingContextTypeOpenGL) {
++      GHOST_Context *context = new GHOST_ContextWink(
++          want_context_params_, canvas_selector, int32_t(width_), int32_t(height_));
++      if (context->initializeDrawingContext()) {
++        return context;
++      }
++      delete context;
++    }
++#else
++    (void)type;
++#endif
+     return nullptr;
+   }
+   GHOST_TSuccess activateDrawingContext() override
+   {
++#ifdef WITH_OPENGL_BACKEND
++    if (getDrawingContextType() == GHOST_kDrawingContextTypeOpenGL) {
++      /* Track the canvas size before the window manager draws into it. */
++      static_cast<GHOST_ContextWink *>(getDrawingContext())->resize(int32_t(width_), int32_t(height_));
++      return GHOST_Window::activateDrawingContext();
++    }
++#endif
++#ifdef WITH_WEBGPU_BACKEND
+     /* Ensure the GPU backend's window backbuffer matches the canvas BEFORE the
+      * window manager draws into it. */
+     blender_webgpu_backbuffer_size(int(width_), int(height_));
++#endif
+     return GHOST_kSuccess;
+   }
+   GHOST_TSuccess setState(GHOST_TWindowState /*state*/) override
+diff --git a/source/blender/draw/engines/eevee/eevee_pipeline.cc b/source/blender/draw/engines/eevee/eevee_pipeline.cc
+index 8e744538..9f31aeab 100644
+--- a/source/blender/draw/engines/eevee/eevee_pipeline.cc
++++ b/source/blender/draw/engines/eevee/eevee_pipeline.cc
+@@ -932,7 +932,7 @@ void DeferredLayer::end_sync(bool is_first_pass,
+         /* Use depth test to reject background pixels which have not been stencil cleared. */
+         /* WORKAROUND: Avoid rasterizer discard by enabling stencil write, but the shaders actually
+          * use no fragment output. */
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+         /* EXPERIMENT: the WebGPU backend has no stencil support and the depth
+          * test kills all but an iso-depth arc — run on every pixel for now. */
+         sub.state_set(DRW_STATE_WRITE_STENCIL | DRW_STATE_STENCIL_EQUAL);
+diff --git a/source/blender/draw/engines/eevee/eevee_shadow.cc b/source/blender/draw/engines/eevee/eevee_shadow.cc
+index 7e4f7ccf..ec86197c 100644
+--- a/source/blender/draw/engines/eevee/eevee_shadow.cc
++++ b/source/blender/draw/engines/eevee/eevee_shadow.cc
+@@ -1207,7 +1207,7 @@ bool ShadowModule::shadow_update_finished(int loop_count)
+     return true;
+   }
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   /* StorageBuf::read() has no synchronous GPU readback on WebGPU/wasm: it
+    * returns the stale host mirror, so view_needed_count is garbage (this was
+    * the bimodal weak-shadow flake — garbage either crossed SHADOW_VIEW_MAX or
+diff --git a/source/blender/draw/engines/select/select_instance.hh b/source/blender/draw/engines/select/select_instance.hh
+index 1afca03a..a54370dc 100644
+--- a/source/blender/draw/engines/select/select_instance.hh
++++ b/source/blender/draw/engines/select/select_instance.hh
+@@ -10,7 +10,7 @@
+ 
+ #include "BKE_object_types.hh"
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ #  include "BKE_object.hh"
+ #  include "BLI_math_geom_c.hh"
+ #endif
+@@ -97,7 +97,7 @@ struct SelectMap {
+   Vector<uint> select_id_map;
+   /** Track objects with OB_DRAW_IN_FRONT. */
+   Vector<bool> in_front_map;
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   /** World-space AABB per internal id, for the CPU pick fallback (the WebGPU
+    * backend cannot read the GPU result back synchronously — no JSPI). */
+   Vector<std::pair<float3, float3>> bounds_map;
+@@ -135,7 +135,7 @@ struct SelectMap {
+     uint id = select_id_map.append_and_get_index(object_id | sub_object_id);
+     in_front_map.append(ob_ref.object->dtx & OB_DRAW_IN_FRONT);
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+     {
+       /* Record the world AABB for the CPU pick fallback (see read_result). */
+       float3 bmin(-0.5f), bmax(0.5f);
+@@ -193,7 +193,7 @@ struct SelectMap {
+ 
+     select_id_map.clear();
+     in_front_map.clear();
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+     bounds_map.clear();
+ #endif
+ #ifndef NDEBUG
+@@ -293,7 +293,7 @@ struct SelectMap {
+     info_buf.push_update();
+   }
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   void cpu_pick_fallback()
+   {
+     View &view = View::default_get();
+@@ -375,7 +375,7 @@ struct SelectMap {
+     select_output_buf.async_flush_to_host();
+     select_output_buf.read();
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+     /* The WebGPU backend cannot read GPU buffers back synchronously (no JSPI):
+      * select_output_buf still holds its clear pattern here. Synthesize the hits
+      * on the CPU from the world AABBs recorded at sync time. Approximate (bbox,
+diff --git a/source/blender/draw/intern/draw_select_buffer.cc b/source/blender/draw/intern/draw_select_buffer.cc
+index 56aa2184..481aba81 100644
+--- a/source/blender/draw/intern/draw_select_buffer.cc
++++ b/source/blender/draw/intern/draw_select_buffer.cc
+@@ -38,7 +38,7 @@
+ 
+ #include "../engines/select/select_engine.hh"
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ #  include "BKE_editmesh.hh"
+ #  include "bmesh.hh"
+ #endif
+@@ -71,7 +71,7 @@ bool SELECTID_Context::is_dirty(Depsgraph *depsgraph, RegionView3D *rv3d)
+ /** \name Buffer of select ID's
+  * \{ */
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ /* The WebGPU backend cannot read the select-id texture back synchronously (no
+  * JSPI): GPU_framebuffer_read_color returns zeros and edit-mode element picking
+  * would select nothing. Rasterize the ids on the CPU into `buf` instead:
+@@ -298,7 +298,7 @@ uint *DRW_select_buffer_read(
+         GPU_select_buffer_stride_realign(rect, &rect_clamp, buf);
+       }
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+       /* The GPU read above returned zeros (deferred readback) — rasterize the
+        * ids on the CPU so edit-mode picking works. */
+       memset(buf, 0, sizeof(uint) * buf_len);
+diff --git a/source/blender/gpu/intern/gpu_select_sample_query.cc b/source/blender/gpu/intern/gpu_select_sample_query.cc
+index 5e8859ff..33670aa4 100644
+--- a/source/blender/gpu/intern/gpu_select_sample_query.cc
++++ b/source/blender/gpu/intern/gpu_select_sample_query.cc
+@@ -30,7 +30,7 @@ namespace blender {
+ 
+ using namespace blender::gpu;
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ namespace gpu {
+ void wgpu_select_query_hint(int x, int y); /* webgpu_context.cc */
+ }
+@@ -66,7 +66,7 @@ void gpu_select_query_begin(GPUSelectBuffer *buffer,
+ {
+   GPU_debug_group_begin("Selection Queries");
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   {
+     /* Tell the WebGPU backend which cursor position this query round is FOR:
+      * occlusion results arrive asynchronously and are cached per position, so a
+diff --git a/source/blender/gpu/intern/gpu_texture_mipmap.cc b/source/blender/gpu/intern/gpu_texture_mipmap.cc
+index 9e23a420..fb2bea10 100644
+--- a/source/blender/gpu/intern/gpu_texture_mipmap.cc
++++ b/source/blender/gpu/intern/gpu_texture_mipmap.cc
+@@ -204,7 +204,7 @@ void GPU_texture_update_mipmap_chain(Texture *tex)
+ 
+   bool use_compute_shaders = true;
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   /* The compute updater relies on multi-mip storage-image bindings + shared
+    * memory reductions that are not yet reliable through the SPIR-V→WGSL path
+    * (garbage mips 1+ made mipmapped image display show recycled texture
+diff --git a/source/blender/windowmanager/intern/wm.cc b/source/blender/windowmanager/intern/wm.cc
+index b3deed14..46f1896f 100644
+--- a/source/blender/windowmanager/intern/wm.cc
++++ b/source/blender/windowmanager/intern/wm.cc
+@@ -39,7 +39,7 @@
+ #include "BKE_screen.hh"
+ #include "BKE_workspace.hh"
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ #  include <vector>
+ 
+ #  include "BKE_image.hh"
+@@ -611,7 +611,7 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
+   MEM_delete(wm->runtime);
+ }
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+ /* webgpu_context.cc: completed asynchronous film readback (see
+  * film_capture_async). GUI F12: the render job reads the film synchronously
+  * and gets zeros; the real pixels arrive here a few ticks later and get
+@@ -716,6 +716,9 @@ static void wm_step_apply_film_result(bContext *C)
+   }
+   fflush(stderr);
+ }
++#endif /* __EMSCRIPTEN__ && WITH_WEBGPU_BACKEND */
++
++#ifdef __EMSCRIPTEN__
+ 
+ /* Phase 2 of the web File ▸ Open flow: the page calls blender_web_file_open_at()
+  * (in wm_files.cc) once a picked folder finishes mounting; this drains that
+@@ -725,7 +728,9 @@ void wm_web_poll_pending_file_open(bContext *C);
+ static void wm_main_step(void *arg)
+ {
+   bContext *C = static_cast<bContext *>(arg);
++#  ifdef WITH_WEBGPU_BACKEND
+   wm_step_apply_film_result(C);
++#  endif
+   wm_web_poll_pending_file_open(C);
+   /* Get events from ghost, handle window events, add to window queues. */
+   wm_window_events_process(C);
+diff --git a/source/blender/windowmanager/intern/wm_files.cc b/source/blender/windowmanager/intern/wm_files.cc
+index 3ebf1143..21a24d6d 100644
+--- a/source/blender/windowmanager/intern/wm_files.cc
++++ b/source/blender/windowmanager/intern/wm_files.cc
+@@ -542,10 +542,13 @@ static void wm_init_userdef(Main *bmain)
+    * and the only way these editors can open on a single-window platform. */
+   U.filebrowser_display_type = USER_TEMP_SPACE_DISPLAY_FULLSCREEN;
+   U.preferences_display_type = USER_TEMP_SPACE_DISPLAY_FULLSCREEN;
++#  ifdef WITH_WEBGPU_BACKEND
+   /* Blend-save thumbnails render offscreen then READ BACK synchronously —
+    * blocking the browser main thread deadlocks (the async map callback can
+-   * never run). Save without previews. */
++   * never run). Save without previews. (The GL-on-wink build reads back
++   * fine: the calling worker blocks while the main thread serves it.) */
+   U.file_preview_type = USER_FILE_PREVIEW_NONE;
++#  endif
+   /* GPU (OpenSubdiv) subdivision evaluation does not run on the WebGPU
+    * backend yet — subdivision-surface modifiers rendered the un-subdivided
+    * base cage. Evaluate on the CPU (correct, slower). */
+diff --git a/source/blender/windowmanager/intern/wm_jobs.cc b/source/blender/windowmanager/intern/wm_jobs.cc
+index 4d329578..1835eb1f 100644
+--- a/source/blender/windowmanager/intern/wm_jobs.cc
++++ b/source/blender/windowmanager/intern/wm_jobs.cc
+@@ -528,7 +528,7 @@ void WM_jobs_start(wmWindowManager *wm, wmJob *wm_job)
+ 
+         // printf("job started: %s\n", wm_job->name);
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+         /* Run the job SYNCHRONOUSLY on the main thread: worker pthreads cannot
+          * touch WebGPU (emdawnwebgpu handles are bound to the creating
+          * thread), and GPU-using jobs (F12 render!) would crash on their first
+@@ -765,7 +765,7 @@ void wm_jobs_handle_finished(const bContext *C)
+ {
+   wmWindowManager *wm = CTX_wm_manager(C);
+   for (wmJob &job : wm->runtime->jobs.items_reversed_mutable()) {
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+     /* Synchronous jobs (see WM_jobs_start) never insert a thread — a finished
+      * one is `running && ready` with an empty pool. Without this the job never
+      * "ends": no end callbacks, no notifiers (the render-result display never
+diff --git a/source/creator/creator.cc b/source/creator/creator.cc
+index 6ec7acd4..eefb1660 100644
+--- a/source/creator/creator.cc
++++ b/source/creator/creator.cc
+@@ -381,7 +381,7 @@ int main(int argc,
+ {
+   using namespace blender;
+ 
+-#ifdef __EMSCRIPTEN__
++#if defined(__EMSCRIPTEN__) && defined(WITH_WEBGPU_BACKEND)
+   /* PROXY_TO_PTHREAD device bootstrap (see top of file). On first entry (demo
+    * provider mode, device not yet acquired on this pthread), asynchronously
+    * request an adapter+device HERE, stash it in this thread's

@@ -139,7 +139,7 @@ deps() {
 numpy() {
   deps
   if [ "$FORCE" != 1 ] && ls "$NUMPY_BUILD"/dist/*.whl >/dev/null 2>&1; then return 0; fi
-  step numpy; bash scripts/build_numpy.sh
+  step numpy; bash scripts/build_numpy_side.sh
 }
 
 # patches/blender/: this repository's changes to the Blender fork, each guarded
@@ -196,7 +196,7 @@ link() {
   step "link $flavor"
   case "$flavor" in
     node|browser|browser-st) TARGET="$flavor" bash scripts/link_blender_headless.sh ;;
-    web) OPTIMIZE="$OPTIMIZE" bash scripts/link_blender_release.sh ;;
+    web) BLENDER_GPU=webgpu OPTIMIZE="$OPTIMIZE" bash scripts/link_blender_release.sh ;;
     *) die "link node|browser|browser-st|web" ;;
   esac
 }

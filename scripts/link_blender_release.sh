@@ -9,7 +9,24 @@
 #   assets.tar.zst        5.3/ + lib/python3.13/ (PYTHONHOME=/opfs/assets)
 #   wgsl-cache.json       pre-seeded shader translations (copied from web/)
 # The dev fast-path (link_blender_web.sh) is untouched and skips zstd.
+#
+# BLENDER_GPU selects the graphics stack the build tree was configured for:
+#   gl     (default) OpenGL backend on wink — Mesa's GL on WebGPU
+#          (cmake/blender-wasm-gl-cache.cmake, build tree build-blender-gl).
+#          The canvas stays on the browser main thread, where wink runs the
+#          driver; Blender's pthreads marshal GL to it (no OffscreenCanvas).
+#   webgpu the custom WebGPU GPU backend (cmake/blender-wasm-cache.cmake,
+#          build tree build-blender; `./build.sh web` passes this); the canvas
+#          is transferred to the Blender pthread as an OffscreenCanvas.
+# BLENDER_BUILD (or BUILD) overrides the build tree either way.
 set -euo pipefail
+BLENDER_GPU="${BLENDER_GPU:-gl}"
+case "$BLENDER_GPU" in
+  gl)     BLENDER_BUILD="${BLENDER_BUILD:-${BUILD:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build-blender-gl}}" ;;
+  webgpu) BLENDER_BUILD="${BLENDER_BUILD:-${BUILD:-}}" ;;
+  *) echo "BLENDER_GPU must be gl or webgpu" >&2; exit 1 ;;
+esac
+[ -n "$BLENDER_BUILD" ] && export BLENDER_BUILD || unset BLENDER_BUILD
 source "$(dirname "${BASH_SOURCE[0]}")/link_common.sh"
 OUT="${OUT:-$ROOT/demo/public}"
 STAGE="$ROOT/demo/.stage"
@@ -21,6 +38,7 @@ mkdir -p "$OUT"
 # --- stage runtime assets ------------------------------------------------------
 # Python under lib/python3.13 so PYTHONHOME=/opfs/assets resolves the stdlib.
 stage_assets "$STAGE" lib/python3.13
+stage_cycles_addon "$STAGE"
 python3 "$ROOT/scripts/trim_ocio.py" "$STAGE/$BLENDER_VERSION_DIR/datafiles/colormanagement"
 precompile_python "$STAGE/$BLENDER_VERSION_DIR/scripts" "$STAGE/lib/python3.13"
 
@@ -96,32 +114,57 @@ cmd=$(cmake_link_cmd "$OUT/blender.js")
 #    views into the one decompressed buffer, materialized on open.
 WASMFS_INC="$EM_BIN/system/lib/wasmfs"
 
+if [ "$BLENDER_GPU" = gl ]; then
+  # wink: Mesa (st/mesa + gex_wgpu + GLSL/NIR), emdawnwebgpu's webgpu.cpp and
+  # Tint, plus their JS libraries in the order wink's manifest lists them.
+  # (scripts/build_wink.sh.) The build tree's CMAKE_EXE_LINKER_FLAGS are empty,
+  # so the extra system ports / libs the WebGPU tree carried there come here
+  # (brotli comes with EXTRA_LINK_LIBS).
+  WINK="$SYSROOT/wink"
+  GPU_FLAGS="$WINK/lib/libwink.a $WINK/lib/libwink_webgpu.a $WINK/lib/libwink_tint.a \
+    $(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(" ".join("--js-library "+sys.argv[2]+"/"+j for j in m["link"]["js_libraries"]))' "$WINK/manifest.json" "$WINK") \
+    -sWASM_BIGINT=1 \
+    -sEXPORTED_FUNCTIONS=_main,_malloc,_free \
+    --use-port=sqlite3 --use-port=bzip2 \
+    $ROOT/cmake/stubs/extra_stubs.o"
+else
+  # $GL: emscripten 6 asserts at startup that OFFSCREENCANVAS_SUPPORT has the GL
+  # library linked, which a WebGPU-only build otherwise drops (the canvas
+  # transfer to the render pthread then aborts). Quoted to survive the eval.
+  # --use-port=emdawnwebgpu: the WebGPU bindings (wgpuCreateInstance, ...). The
+  # gpu module compiles with the port, but nothing puts it on CMake's link line,
+  # and without it the backend aborts at startup on a missing function.
+  GPU_FLAGS="-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE='\$GL' --use-port=emdawnwebgpu \
+    -sOFFSCREENCANVAS_SUPPORT=1 -sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
+fi
+
 # CPython's archive carries its own expat (build_python.sh folds pyexpat's
 # objects in) and OpenImageIO pulls the standalone libexpat: the first
 # definition is taken, as in link_blender_headless.sh.
-# $GL: emscripten 6 asserts at startup that OFFSCREENCANVAS_SUPPORT has the GL
-# library linked, which a WebGPU-only build otherwise drops (the canvas
-# transfer to the render pthread then aborts). Quoted to survive the eval.
-# --use-port=emdawnwebgpu: the WebGPU bindings (wgpuCreateInstance, ...). The
-# gpu module compiles with the port, but nothing puts it on CMake's link line,
-# and without it the backend aborts at startup on a missing function.
 WEB_FLAGS="-pthread \
   -Wl,--allow-multiple-definition \
-  -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE='\$GL' \
-  --use-port=emdawnwebgpu \
   -sEXIT_RUNTIME=0 -g2 \
   $LINK_OPT \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=1073741824 -sMAXIMUM_MEMORY=4294967296 \
   -sSTACK_SIZE=16777216 -sDEFAULT_PTHREAD_STACK_SIZE=4194304 \
   -sPTHREAD_POOL_SIZE=32 -sPTHREAD_POOL_SIZE_STRICT=0 \
   -sPROXY_TO_PTHREAD=1 \
-  -sOFFSCREENCANVAS_SUPPORT=1 -sOFFSCREENCANVASES_TO_PTHREAD=#canvas \
+  $GPU_FLAGS \
   -sWASMFS -sFORCE_FILESYSTEM=1 \
   -std=c++17 -I$WASMFS_INC $ROOT/demo/localdir_backend.cpp $ROOT/demo/provider_backend.cpp \
   --js-library $ROOT/demo/localdir_lib.js \
   --js-library $ROOT/demo/provider-fs.js \
-  -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPF32 \
+  -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,cwrap,ENV,HEAPU8,HEAPU16,HEAPU32,HEAPF32 \
   -sENVIRONMENT=web,worker -sASSERTIONS=1 -sERROR_ON_UNDEFINED_SYMBOLS=0"
+
+# NumPy as builtin modules (scripts/build_numpy.sh): the constructor in
+# numpy_inittab.o registers them and pulls the extension objects from the
+# archive. Its Python package ships in assets via lib/python3.13/site-packages.
+if [ -f "$SYSROOT/lib/numpy_inittab.o" ]; then
+  WEB_FLAGS="$WEB_FLAGS $SYSROOT/lib/numpy_inittab.o $SYSROOT/lib/libnumpy.a"
+else
+  echo "!! WARNING: numpy not built (scripts/build_numpy.sh) — add-ons that import numpy (glTF, FBX, ...) will fail"
+fi
 
 echo ">> relinking blender → $OUT/blender.js (release, no preload)"
 ( cd "$BLENDER_BUILD" && eval "$cmd $EXTRA_LINK_LIBS $WEB_FLAGS" )
@@ -135,7 +178,16 @@ log "blender.wasm.zst (zstd --ultra -$ZSTD_LEVEL -T0)"
 zstd -f --ultra -"$ZSTD_LEVEL" -T0 "$OUT/blender.wasm" -o "$OUT/blender.wasm.zst"
 rm -f "$OUT/blender.wasm"
 
-cp -f "$ROOT/web/wgsl-cache.json" "$OUT/wgsl-cache.json" 2>/dev/null || true
+if [ "$BLENDER_GPU" = gl ]; then
+  # wink's SPIR-V -> WGSL translations for the shaders the common paths use
+  # (made by `DUMP_WGSL=demo/wgsl-cache-gl.bin TAG=dump node
+  # scripts/compat_suite.mjs demo/dist`, then zstd -19). wink refuses a blob
+  # from a different Tint build whole, so a stale one only costs its download.
+  cp -f "$ROOT/demo/wgsl-cache-gl.bin.zst" "$OUT/wgsl-cache-gl.bin.zst" 2>/dev/null || true
+else
+  rm -f "$OUT/wgsl-cache-gl.bin.zst"
+  cp -f "$ROOT/web/wgsl-cache.json" "$OUT/wgsl-cache.json" 2>/dev/null || true
+fi
 
 # Manifest with decompressed sizes (zstddec wants explicit sizes).
 python3 - "$OUT" <<'PYEOF'
@@ -145,7 +197,9 @@ import subprocess
 import sys
 out = sys.argv[1]
 sizes = {}
-for name in ("blender.wasm.zst", "assets.tar.zst"):
+for name in ("blender.wasm.zst", "assets.tar.zst", "wgsl-cache-gl.bin.zst"):
+    if not os.path.exists(os.path.join(out, name)):
+        continue
     r = subprocess.run(["zstd", "-lv", os.path.join(out, name)], capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if "Decompressed Size" in line:

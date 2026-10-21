@@ -15,6 +15,27 @@ PYSRC=$(fetch_extract \
   "Python-3.13.13.tar.xz" "Python-3.13.13")
 apply_patches python "$PYSRC"
 
+# The bundled mimalloc's internal.h does `#define __wasi__` on Emscripten, and it
+# leaks into every core module through pycore_*.h. timemodule.c then takes its
+# WASI-only (gh-115714) fallbacks, leaving time.process_time()/times() on clock(),
+# which Emscripten doesn't implement -> RuntimeError (breaks e.g. the FBX
+# exporter). Emscripten's CPU-time clocks work, so undo the leak in that file.
+if ! grep -q "blender-wasm: mimalloc __wasi__ leak" "$PYSRC/Modules/timemodule.c"; then
+  python3 - "$PYSRC/Modules/timemodule.c" <<'PYEOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+anchor = '#include <time.h>                 // clock()\n'
+assert anchor in s
+s = s.replace(anchor, anchor + (
+    '/* blender-wasm: mimalloc __wasi__ leak (see scripts/build_python.sh). */\n'
+    '#if defined(__EMSCRIPTEN__) && defined(__wasi__)\n'
+    '#  undef __wasi__\n'
+    '#endif\n'), 1)
+open(p, 'w').write(s)
+PYEOF
+  log "patched timemodule.c (emscripten CPU-time clocks)"
+fi
+
 # 1) Native build-python (host interpreter used by the cross-build).
 NATIVE="$BLD/python-native"
 # Must be a COMPLETE build (incl. extension modules like binascii) — the wasm

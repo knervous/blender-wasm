@@ -20,6 +20,7 @@ mkdir -p "$WEB"
 
 # --- stage runtime assets (trimmed CPython stdlib, see link_common.sh) -----
 stage_assets "$STAGE" python3.13
+stage_cycles_addon "$STAGE"
 # OCIO diet: a browser canvas is an sRGB display — drop the P3/Rec.2020/
 # Rec.2100 display definitions and their (multi-MB) AgX cubes, plus the
 # niche Khronos PBR Neutral view. AgX_Base_Rec2020.cube STAYS: the kept

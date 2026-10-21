@@ -30,6 +30,17 @@ cmake_link_cmd() {
 # first font load).
 EXTRA_LINK_LIBS="$SYSROOT/lib/libbrotlidec.a $SYSROOT/lib/libbrotlicommon.a"
 
+# stage_cycles_addon <stage-dir>
+# Cycles' Python add-on lives with its sources, not in scripts/ (CMake installs
+# it); without it the engine is compiled in but cannot be selected. Staged only
+# when the build tree was configured WITH_CYCLES.
+stage_cycles_addon() {
+  local dst="$1/$BLENDER_VERSION_DIR/scripts/addons_core/cycles"
+  grep -q "^WITH_CYCLES:BOOL=ON" "$BLENDER_BUILD/CMakeCache.txt" 2>/dev/null || return 0
+  cp -r "$BLENDER_SRC/intern/cycles/blender/addon" "$dst"
+  find "$dst" -name '__pycache__' -type d -prune -exec rm -rf {} +
+}
+
 # stage_assets <stage-dir> <python-subdir>
 # Copies Blender's runtime data (scripts + datafiles) to <stage>/<version>/ and
 # the trimmed CPython stdlib to <stage>/<python-subdir>/.
@@ -62,7 +73,7 @@ stage_cycles_addon() {
 }
 
 # stage_numpy <python-stage-dir>
-# io_scene_gltf2 imports numpy at module scope; scripts/build_numpy.sh
+# io_scene_gltf2 imports numpy at module scope; scripts/build_numpy_side.sh
 # cross-builds it as emscripten SIDE_MODULEs loaded through CPython's dlopen.
 stage_numpy() {
   local pystage="$1" whl

@@ -350,6 +350,14 @@ const gpuProbePromise = probeGpu().then((result) => {
  * FsProvider) and `wasmBytes` are consumed when the user clicks Launch. ---- */
 setUiPhase("loading");
 await decoder.init();
+/* GL build: wink's shipped SPIR-V -> WGSL translations (~400 KB). Optional:
+ * without it every shader's first use waits on Tint instead. */
+const wgslSeedPromise = manifest["wgsl-cache-gl.bin.zst"]
+  ? fetch("wgsl-cache-gl.bin.zst")
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((b) => (b ? decoder.decode(new Uint8Array(b), manifest["wgsl-cache-gl.bin.zst"]) : null))
+      .catch((e) => { log("wgsl seed: " + e); return null; })
+  : Promise.resolve(null);
 const [assetsTar, wasmBytes] = await Promise.all([
   fetchZst("assets.tar.zst", "assets").then((z) => {
     setProgress({ phase: "decompressing", percent: 1, message: "Decompressing assets" });
@@ -379,6 +387,60 @@ const idbOpen = () => new Promise((res, rej) => {
   rq.onerror = () => rej(rq.error);
 });
 
+/* wink (GL build) keeps its own SPIR-V -> WGSL cache in the wasm heap: the
+ * shipped seed and what earlier sessions translated (IndexedDB, "gl:<id>"
+ * records) go in before main; what this session translates is saved when the
+ * page is hidden. A record from another wink build is refused, then dropped. */
+const wgslBlobs = { seed: null, saved: [], db: null };
+function loadWinkWgslCache() {
+  const M = window.Module;
+  if (!M._gex_wgsl_cache_load) return;
+  const load = (bytes) => {
+    const p = M._malloc(bytes.length);
+    M.HEAPU8.set(bytes, p);
+    const n = M._gex_wgsl_cache_load(p, bytes.length);
+    M._free(p);
+    return n;
+  };
+  const parts = [];
+  if (wgslBlobs.seed) parts.push("seed " + load(wgslBlobs.seed));
+  for (const r of wgslBlobs.saved) {
+    const n = load(new Uint8Array(r.wgsl));
+    parts.push(r.key + " " + n);
+    if (n < 0) try { wgslBlobs.db.transaction("wgsl", "readwrite").objectStore("wgsl").delete(r.key); } catch (e) {}
+  }
+  wgslBlobs.seed = null; wgslBlobs.saved = [];
+  log("wink wgsl cache: " + (parts.join(", ") || "empty"));
+  /* One record per session, rewritten on every hide; past 16 sessions they
+   * are merged into this one (a full dump), which covers them all. */
+  const key = "gl:" + Date.now().toString(36);
+  let savedFresh = 0;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden" || !wgslBlobs.db) return;
+    try {
+      const st = M._malloc(24);
+      M._gex_wgsl_cache_stats(st);
+      const misses = M.HEAPU32[(st >> 2) + 1];
+      M._free(st);
+      if (misses === savedFresh) return;
+      savedFresh = misses;
+      const store = wgslBlobs.db.transaction("wgsl", "readwrite").objectStore("wgsl");
+      const rq = store.getAllKeys(IDBKeyRange.bound("gl:", "gl:\uffff"));
+      rq.onsuccess = () => {
+        const merge = rq.result.filter((k) => k !== key).length >= 16;
+        const lenp = M._malloc(4);
+        const p = M._gex_wgsl_cache_dump(merge ? 0 : 1, lenp);
+        const len = M.HEAPU32[lenp >> 2];
+        const bytes = M.HEAPU8.slice(p, p + len).buffer;
+        M._free(p); M._free(lenp);
+        const tx = wgslBlobs.db.transaction("wgsl", "readwrite").objectStore("wgsl");
+        if (merge) for (const k of rq.result) if (k !== key) tx.delete(k);
+        tx.put({ key, wgsl: bytes });
+      };
+    } catch (e) { log("wink wgsl save: " + e); }
+  });
+}
+
 /* ---- boot ---- */
 window.__BGUI__ = { booted: false, device: false, window: false };
 let resolveEmbedSave = null;
@@ -386,7 +448,7 @@ const scan = (t) => {
   if (t.includes("WEBGPU_CONTEXT") && t.includes("real device acquired")) window.__BGUI__.device = true;
   /* First frame that actually drew something (not the black startup clear):
    * swap the splash/console for the live canvas. */
-  if (t.includes("WGPU_FIRST_CONTENT") && !window.__BGUI__.window) {
+  if ((t.includes("WGPU_FIRST_CONTENT") || t.includes("WINK_FIRST_FRAME")) && !window.__BGUI__.window) {
     window.__BGUI__.window = true;
     splashEl.classList.add("done");
     canvas.classList.add("ready");
@@ -940,6 +1002,14 @@ window.Module = {
     addRunDependency("wgsl-cache");
     (async () => {
       const db = await idbOpen();
+      /* GL build: blobs for wink's cache, handed in in onRuntimeInitialized
+       * (before main, so before any shader compiles). */
+      wgslBlobs.seed = await wgslSeedPromise;
+      wgslBlobs.saved = await new Promise((res) => {
+        const rq = db.transaction("wgsl").objectStore("wgsl").getAll(IDBKeyRange.bound("gl:", "gl:\uffff"));
+        rq.onsuccess = () => res(rq.result); rq.onerror = () => res([]);
+      });
+      wgslBlobs.db = db;
       const rows = await new Promise((res, rej) => {
         const rq = db.transaction("wgsl").objectStore("wgsl").getAll();
         rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
@@ -965,6 +1035,7 @@ window.Module = {
       window.Module.FS.writeFile(embed.sessionPath, sessionBytes);
       log(`Session mounted at ${embed.sessionPath}`);
     }
+    loadWinkWgslCache();
     /* Parent of the local-folder mount points (wm_open_mainfile also creates
      * it wasm-side; this covers sessions where the dialog never opened). */
     try { window.Module.FS.mkdir(MOUNT_ROOT); } catch (e) { /* exists */ }
