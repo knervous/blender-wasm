@@ -10,14 +10,15 @@
       #view { width: 100%; height: 100%; display: block; }
     </style>
     <!-- three.js and the editor from CDNs: no build step. The editor and the core
-         use three.js for types only, so this page's three is the only copy. -->
+         use three.js for types only, so this page's three is the only copy.
+         ?deps pins the core the editor uses to the runtime version below. -->
     <script type="importmap">
       {
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
-          "@knervous/blender-web-editor": "https://esm.sh/@knervous/blender-web-editor@0.0.2",
-          "@knervous/blender-web-editor/three": "https://esm.sh/@knervous/blender-web-editor@0.0.2/three"
+          "@knervous/blender-web-editor": "https://esm.sh/@knervous/blender-web-editor@0.0.2?deps=@knervous/blender-web@0.0.5",
+          "@knervous/blender-web-editor/three": "https://esm.sh/@knervous/blender-web-editor@0.0.2/three?deps=@knervous/blender-web@0.0.5"
         }
       }
     </script>
