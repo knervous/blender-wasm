@@ -9,7 +9,7 @@ the components below, each under its own license.
 
 | component | version | license |
 |---|---|---|
-| [Blender](https://www.blender.org/) ([HeyPuter/blender](https://github.com/HeyPuter/blender) at `6b031d3d41c3`) | 5.3 | GPL-3.0-or-later (binary), GPL-2.0-or-later (sources) |
+| [Blender](https://www.blender.org/) ([HeyPuter/blender](https://github.com/HeyPuter/blender) at `fe16888d9e1e`) | 5.3 | GPL-3.0-or-later (binary), GPL-2.0-or-later (sources) |
 | [CPython](https://www.python.org/) | 3.13.13 | PSF-2.0 |
 | [NumPy](https://numpy.org/) | 2.2.6 | BSD-3-Clause (and bundled components) |
 | [oneTBB](https://github.com/uxlfoundation/oneTBB) | 2022.3.0 | Apache-2.0 |
