@@ -5,11 +5,11 @@
 // @knervous/blender-web-editor HUD docks on the right: edit in Lite, run
 // Python or RNA calls in Blender, or swap to Blender's own UI and back.
 import * as LITE from "@babylonjs/lite";
-import { mountEditor } from "@knervous/blender-web-editor@0.0.1";
-import { liteViewport } from "@knervous/blender-web-editor@0.0.1/lite";
+import { mountEditor } from "@knervous/blender-web-editor@0.0.2";
+import { liteViewport } from "@knervous/blender-web-editor@0.0.2/lite";
 
 // Blender's runtime (the core package's runtime/, at the version the editor uses).
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.4/runtime/";
 // The hosted Blender UI (the fork's `./build.sh web`) behind the "Blender UI" button.
 const BLENDER_UI = "https://blender-web-ui.pcj174.workers.dev/";
 const PLANE = "https://assets.babylonjs.com/meshes/aerobatic_plane.glb";

@@ -5,9 +5,9 @@
 // @knervous/blender-web-editor HUD docks on the right: edit in Babylon, run
 // Python or RNA calls in Blender, or swap to Blender's own UI and back.
 
-const EDITOR = "https://esm.sh/@knervous/blender-web-editor@0.0.1";
+const EDITOR = "https://esm.sh/@knervous/blender-web-editor@0.0.2";
 // Blender's runtime (the core package's runtime/, at the version the editor uses).
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.3/runtime/";
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.4/runtime/";
 // The hosted Blender UI (the fork's `./build.sh web`) behind the "Blender UI" button.
 const BLENDER_UI = "https://blender-web-ui.pcj174.workers.dev/";
 const PLANE = "https://assets.babylonjs.com/meshes/aerobatic_plane.glb";
@@ -50,12 +50,9 @@ export const createScene = async function () {
         });
         await editor.ready;
 
-        // A real asset, loaded by Babylon with its textures and held in its rest
-        // pose (Blender gets static geometry), then adopted into the project.
-        const file = new File([await (await fetch(PLANE)).arrayBuffer()], "aerobatic_plane.glb");
-        await viewport.openUntracked(file);
-        scene.animationGroups.forEach((group) => group.stop());
-        for (const mesh of scene.meshes) mesh.skeleton = null;
+        // A real asset, loaded by Babylon with its textures, then adopted into the project.
+        await viewport.openUntracked(new File([await (await fetch(PLANE)).arrayBuffer()], "aerobatic_plane.glb"));
+        scene.animationGroups.forEach((group) => group.stop()); // hold its pose: a spinning propeller is an edit
         viewport.adoptUntracked();
         await editor.project.sync();
 

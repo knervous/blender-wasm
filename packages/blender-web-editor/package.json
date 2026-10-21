@@ -1,19 +1,46 @@
 {
   "name": "@knervous/blender-web-editor",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "An editor HUD on @knervous/blender-web: mounts over a Babylon.js, Babylon Lite or three.js scene and drives Blender (WebAssembly) from it, with a swap to the full Blender UI.",
   "license": "GPL-3.0-or-later",
-  "repository": { "type": "git", "url": "git+https://github.com/knervous/blender-wasm.git", "directory": "packages/blender-web-editor" },
-  "keywords": ["blender", "editor", "babylonjs", "babylon-lite", "threejs", "webassembly"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knervous/blender-wasm.git",
+    "directory": "packages/blender-web-editor"
+  },
+  "keywords": [
+    "blender",
+    "editor",
+    "babylonjs",
+    "babylon-lite",
+    "threejs",
+    "webassembly"
+  ],
   "type": "module",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./babylon": { "types": "./dist/babylon.d.ts", "default": "./dist/babylon.js" },
-    "./lite": { "types": "./dist/lite.d.ts", "default": "./dist/lite.js" },
-    "./three": { "types": "./dist/three.d.ts", "default": "./dist/three.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./babylon": {
+      "types": "./dist/babylon.d.ts",
+      "default": "./dist/babylon.js"
+    },
+    "./lite": {
+      "types": "./dist/lite.d.ts",
+      "default": "./dist/lite.js"
+    },
+    "./three": {
+      "types": "./dist/three.d.ts",
+      "default": "./dist/three.js"
+    },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -21,7 +48,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@knervous/blender-web": "^0.0.3"
+    "@knervous/blender-web": "~0.0.4"
   },
   "peerDependencies": {
     "@babylonjs/core": ">=8",
@@ -29,9 +56,15 @@
     "three": ">=0.160"
   },
   "peerDependenciesMeta": {
-    "@babylonjs/core": { "optional": true },
-    "@babylonjs/lite": { "optional": true },
-    "three": { "optional": true }
+    "@babylonjs/core": {
+      "optional": true
+    },
+    "@babylonjs/lite": {
+      "optional": true
+    },
+    "three": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@babylonjs/core": "^9.31.0",

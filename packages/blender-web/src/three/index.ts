@@ -34,6 +34,7 @@ export type ThreeApi = Pick<typeof THREE,
 
 type Object3D = THREE.Object3D;
 type Material = THREE.Material;
+type Mesh = THREE.Mesh;
 type BufferGeometry = THREE.BufferGeometry;
 
 export interface FieldAdapter<V> {
@@ -243,12 +244,17 @@ export class ThreeSide implements EngineSide<Object3D, Material> {
   // --- tracking engine content ---------------------------------------------------
   track(nodes: Object3D[]): string[] {
     const ids: string[] = [];
-    const visit = (node: Object3D): void => {
+    const visit = (tracked: Object3D): void => {
+      let node = tracked;
       if (!this.idOf(node)) {
         const id = newId();
         if (node instanceof this.api.Mesh && node.geometry instanceof this.api.BufferGeometry && node.geometry.getAttribute("position")) {
           const data = readGeometry(node.geometry);
-          if (data) {
+          if (data && isSkinned(node)) {
+            // Skin attributes do not survive the rebuild (and Blender sends none
+            // back): a skinned mesh joins the project as a plain mesh in its bind pose.
+            node = this.swapForMesh(node, buildGeometry(this.api, data), node.material);
+          } else if (data) {
             node.geometry.dispose();
             node.geometry = buildGeometry(this.api, data);
           }
@@ -355,15 +361,22 @@ export class ThreeSide implements EngineSide<Object3D, Material> {
     const node = this.node(id);
     if (!node) return;
     // A skinned mesh cannot take Blender's evaluated vertices (they carry no
-    // skin weights; its shader would collapse them): it is swapped below too.
-    if (node instanceof this.api.Mesh && !("isSkinnedMesh" in node && node.isSkinnedMesh)) {
+    // skin weights; its shader would collapse them): it is swapped like an empty.
+    if (node instanceof this.api.Mesh && !isSkinned(node)) {
       node.geometry.dispose();
       node.geometry = buildGeometry(this.api, mesh);
       this.assignSlots(node, dataOf(node).bwMaterials ?? []);
       return;
     }
-    // An empty that became a mesh, or a skinned mesh: swap the node, keep children and fields.
-    const replacement = new this.api.Mesh(buildGeometry(this.api, mesh), this.emptySlot);
+    // An empty that became a mesh, or a skinned mesh.
+    const replacement = this.swapForMesh(node, buildGeometry(this.api, mesh), this.emptySlot);
+    this.entities.set(id, replacement);
+    this.assignSlots(replacement, dataOf(replacement).bwMaterials ?? []);
+  }
+
+  /** A plain mesh in a node's place: its children, fields and spot among its siblings. */
+  private swapForMesh(node: Object3D, geometry: BufferGeometry, material: Material | Material[]): Mesh {
+    const replacement = new this.api.Mesh(geometry, material);
     replacement.name = node.name;
     replacement.userData = node.userData;
     replacement.position.copy(node.position);
@@ -371,12 +384,21 @@ export class ThreeSide implements EngineSide<Object3D, Material> {
     replacement.scale.copy(node.scale);
     replacement.visible = node.visible;
     for (const child of [...node.children]) replacement.add(child);
-    (node.parent ?? this.root).add(replacement);
+    const parent = node.parent ?? this.root;
+    const at = parent.children.indexOf(node);
+    parent.add(replacement);
+    if (at >= 0) {
+      // Keep sibling order (outliners and exports follow it).
+      parent.children.splice(parent.children.indexOf(replacement), 1);
+      parent.children.splice(at, 0, replacement);
+    }
     node.removeFromParent();
-    this.entities.set(id, replacement);
-    this.assignSlots(replacement, dataOf(replacement).bwMaterials ?? []);
+    if (node instanceof this.api.Mesh) node.geometry.dispose();
+    return replacement;
   }
 }
+
+const isSkinned = (node: Object3D): boolean => "isSkinnedMesh" in node && node.isSkinnedMesh === true;
 
 const isNumbers = (value: unknown, length: number): boolean =>
   Array.isArray(value) && value.length === length && value.every((v) => typeof v === "number");
