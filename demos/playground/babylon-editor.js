@@ -7,7 +7,7 @@
 
 const EDITOR = "https://esm.sh/@knervous/blender-web-editor@0.0.2";
 // Blender's runtime (the core package's runtime/, at the version the editor uses).
-const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.4/runtime/";
+const RUNTIME = "https://cdn.jsdelivr.net/npm/@knervous/blender-web@0.0.5/runtime/";
 // The hosted Blender UI (the fork's `./build.sh web`) behind the "Blender UI" button.
 const BLENDER_UI = "https://blender-web-ui.pcj174.workers.dev/";
 const PLANE = "https://assets.babylonjs.com/meshes/aerobatic_plane.glb";
